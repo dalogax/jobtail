@@ -176,6 +176,84 @@ func TestRmDeletesJobAndRuns(t *testing.T) {
 	}
 }
 
+// TestRmAlsoDeletesLogFiles is the regression test for a real gap found
+// while diagnosing a stuck run: `rm` only ever deleted the jobs/runs
+// database rows, never the run log files on disk, leaving them orphaned
+// (found a genuine 29KB orphaned log file this way on a real box).
+func TestRmAlsoDeletesLogFiles(t *testing.T) {
+	e := newEnv(t)
+	work := t.TempDir()
+	e.run("add", "temp", "--kind", "cli", "--cron", "0 0 * * *", "--cwd", work, "--cmd", "echo hi")
+	e.run("run", "temp")
+
+	runs := mustUnmarshalRuns(t, e.run("runs", "temp", "--json"))
+	if len(runs) != 1 {
+		t.Fatalf("want 1 run, got %d", len(runs))
+	}
+	logPath := runs[0].LogPath
+	if _, err := os.Stat(logPath); err != nil {
+		t.Fatalf("log file should exist before rm: %v", err)
+	}
+
+	e.run("rm", "temp")
+
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("rm should have deleted the run's log file, got err=%v", err)
+	}
+}
+
+// TestAddResolvesRelativeCwdToAbsolute is the regression test for a real
+// gap: --cwd was stored exactly as typed, so a relative path would resolve
+// differently depending on who invoked the job later (an interactive
+// `jobtail run` from wherever the user happened to be, the systemd timer's
+// `tick`, or the TUI's "run now") — each has a different actual working
+// directory. add/edit must resolve it once, at registration time.
+func TestAddResolvesRelativeCwdToAbsolute(t *testing.T) {
+	e := newEnv(t)
+	work := t.TempDir()
+	sub := filepath.Join(work, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(e.bin, "add", "relcwd", "--kind", "cli", "--cron", "0 0 * * *", "--cwd", "sub", "--cmd", "true")
+	cmd.Dir = work
+	cmd.Env = append(os.Environ(), "JOBTAIL_DATA_DIR="+e.dataDir, "JOBTAIL_DISABLE_NOTIFY=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("add: %v\n%s", err, out)
+	}
+
+	jobs := mustUnmarshalJobs(t, e.run("list", "--json"))
+	// jobJSON doesn't carry Cwd; fetch it via `show --json` instead.
+	out := e.run("show", "relcwd", "--json")
+	var shown struct {
+		Job struct {
+			Cwd string
+		}
+	}
+	if err := json.Unmarshal([]byte(out), &shown); err != nil {
+		t.Fatalf("unmarshal show output: %v\n%s", err, out)
+	}
+	if shown.Job.Cwd != sub {
+		t.Fatalf("want resolved absolute cwd %q, got %q", sub, shown.Job.Cwd)
+	}
+	if findJob(jobs, "relcwd") == nil {
+		t.Fatal("job not found after add")
+	}
+}
+
+func TestAddRejectsNonexistentCwd(t *testing.T) {
+	e := newEnv(t)
+	out, err := e.runAllowFail("add", "badcwd", "--kind", "cli", "--cron", "0 0 * * *",
+		"--cwd", "/no/such/directory/really", "--cmd", "true")
+	if err == nil {
+		t.Fatalf("expected an error for a nonexistent --cwd, got success: %s", out)
+	}
+	if !strings.Contains(out, "no such file") && !strings.Contains(out, "no such directory") {
+		t.Fatalf("expected a clear reason, got: %s", out)
+	}
+}
+
 // TestTickConvergesThenIdempotent exercises the scheduling core: each `tick`
 // call advances a job by exactly one cron step from its last scheduled fire
 // (PRD §10's cron.Next, one step per call). Ticking repeatedly at a *fixed*

@@ -226,16 +226,38 @@ func (s *Store) SetEnabled(ctx context.Context, id string, enabled bool) error {
 	return checkRowsAffected(res)
 }
 
-func (s *Store) DeleteJob(ctx context.Context, id string) error {
+// DeleteJob removes a job and its run history, returning the deleted runs'
+// log paths so the caller can also remove those files — DELETE FROM runs
+// only removes the database rows, never touches the log files on disk.
+func (s *Store) DeleteJob(ctx context.Context, id string) ([]string, error) {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM jobs WHERE id = ?`, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := checkRowsAffected(res); err != nil {
-		return err
+		return nil, err
 	}
+
+	var logPaths []string
+	rows, err := s.db.QueryContext(ctx, `SELECT log_path FROM runs WHERE job_id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		logPaths = append(logPaths, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+
 	_, err = s.db.ExecContext(ctx, `DELETE FROM runs WHERE job_id = ?`, id)
-	return err
+	return logPaths, err
 }
 
 // EditJob applies a sparse patch: zero-value fields in patch are left unchanged

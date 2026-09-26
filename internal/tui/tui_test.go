@@ -266,7 +266,7 @@ func TestMouseBoundariesMatchActualRenderedBorders(t *testing.T) {
 		t.Fatalf("expected the log pane's top border at row topBoxHeight=%d, got: %q", m.topBoxHeight, logBorderRow)
 	}
 	logTitleRow := ansiRE.ReplaceAllString(lines[m.topBoxHeight+1], "")
-	if !strings.Contains(logTitleRow, "Log:") {
+	if !strings.Contains(logTitleRow, "Log") {
 		t.Fatalf("expected the log pane's title at row topBoxHeight+1=%d, got: %q", m.topBoxHeight+1, logTitleRow)
 	}
 }

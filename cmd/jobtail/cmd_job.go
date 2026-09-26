@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"text/tabwriter"
 	"time"
 
@@ -13,6 +14,35 @@ import (
 	"github.com/dalogax/jobtail/internal/cronx"
 	"github.com/dalogax/jobtail/internal/store"
 )
+
+// resolveCwd turns whatever --cwd the caller typed (relative or absolute)
+// into an absolute path, resolved against the CLI's own working directory
+// at the moment of the call, and confirms it actually exists.
+//
+// This has to happen at add/edit time, not execution time: a job's
+// run-exec can be invoked from very different working directories
+// depending on the trigger — an interactive `jobtail run` from whatever
+// directory the user happened to be in, the systemd timer's `tick`
+// (whatever cwd systemd gives a user unit, not necessarily $HOME), or the
+// TUI's "run now". A relative --cwd would resolve differently in each of
+// those, silently pointing at the wrong directory or failing outright.
+func resolveCwd(cwd string) (string, error) {
+	if cwd == "" {
+		return "", fmt.Errorf("--cwd is required")
+	}
+	abs, err := filepath.Abs(cwd)
+	if err != nil {
+		return "", fmt.Errorf("--cwd: %w", err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("--cwd %q: %w", abs, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("--cwd %q is not a directory", abs)
+	}
+	return abs, nil
+}
 
 func newAddCmd() *cobra.Command {
 	var kind, cronExpr, cwd, command, prompt, model, permMode, timezone string
@@ -34,9 +64,11 @@ func newAddCmd() *cobra.Command {
 			if err := cronx.Validate(cronExpr); err != nil {
 				return fmt.Errorf("invalid --cron: %w", err)
 			}
-			if cwd == "" {
-				return fmt.Errorf("--cwd is required")
+			resolvedCwd, err := resolveCwd(cwd)
+			if err != nil {
+				return err
 			}
+			cwd = resolvedCwd
 			if kind == "cli" && command == "" {
 				return fmt.Errorf("--cmd is required for --kind cli")
 			}
@@ -281,6 +313,13 @@ func newEditCmd() *cobra.Command {
 					return fmt.Errorf("invalid --cron: %w", err)
 				}
 			}
+			if cmd.Flags().Changed("cwd") {
+				resolved, err := resolveCwd(cwd)
+				if err != nil {
+					return err
+				}
+				cwd = resolved
+			}
 			a, err := openApp()
 			if err != nil {
 				return err
@@ -337,7 +376,14 @@ func newRmCmd() *cobra.Command {
 				return err
 			}
 			defer a.st.Close()
-			return a.st.DeleteJob(context.Background(), args[0])
+			logPaths, err := a.st.DeleteJob(context.Background(), args[0])
+			if err != nil {
+				return err
+			}
+			for _, p := range logPaths {
+				_ = os.Remove(p) // best-effort: a missing/already-gone file isn't an error here
+			}
+			return nil
 		},
 	}
 }

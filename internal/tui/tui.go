@@ -704,9 +704,8 @@ func (m model) View() string {
 		titleStyle.Render("Jobs") + "\n" + m.jobsTable.View())
 	runsBox := paneStyle(m.focus == focusRuns).Render(
 		titleStyle.Render("Runs: "+m.selectedJobID()) + "\n" + m.runsTable.View())
-	runID, _ := m.selectedRun()
 	logBox := paneStyle(m.focus == focusLog).Render(
-		titleStyle.Render("Log: "+runID) + "\n" + m.logVP.View())
+		titleStyle.Render("Log") + "\n" + m.logVP.View())
 
 	top := lipgloss.JoinHorizontal(lipgloss.Top, jobsBox, runsBox)
 	body := lipgloss.JoinVertical(lipgloss.Left, top, logBox)
