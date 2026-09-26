@@ -673,13 +673,23 @@ func nextRunLabel(j store.JobSummary) string {
 func runRows(runs []store.Run) []table.Row {
 	rows := make([]table.Row, 0, len(runs))
 	for _, r := range runs {
-		dur := "-"
-		if r.FinishedAt.Valid {
-			dur = r.FinishedAt.Time.Sub(r.StartedAt).Round(time.Second).String()
-		}
-		rows = append(rows, table.Row{r.Status, r.Trigger, r.StartedAt.Local().Format("01-02 15:04"), dur})
+		rows = append(rows, table.Row{r.Status, r.Trigger, r.StartedAt.Local().Format("01-02 15:04"), runDuration(r)})
 	}
 	return rows
+}
+
+// runDuration mirrors cmd_job.go's helper of the same name (measured
+// duration_ms when present; falls back to the timestamp difference only
+// for runs recorded before that field existed — see store's
+// additiveMigrations comment for why the two aren't interchangeable).
+func runDuration(r store.Run) string {
+	if r.DurationMs.Valid {
+		return time.Duration(r.DurationMs.Int64 * int64(time.Millisecond)).Round(time.Millisecond).String()
+	}
+	if !r.FinishedAt.Valid {
+		return "-"
+	}
+	return r.FinishedAt.Time.Sub(r.StartedAt).Round(time.Second).String()
 }
 
 func statusStyle(s string) lipgloss.Style {

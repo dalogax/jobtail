@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -112,6 +113,34 @@ func TestCLIJobLifecycle(t *testing.T) {
 	j = findJob(jobs, "greet")
 	if j.RunCount != 1 || j.LastStatus != "ok" {
 		t.Fatalf("job summary didn't pick up the run: %+v", j)
+	}
+}
+
+// TestRunsAndShowDisplayDuration is the regression test for a real gap: run
+// duration (started_at/finished_at are both stored, and the TUI already
+// shows a "Dur" column) was nowhere in the plain-text `runs`/`show`
+// output — only recoverable by hand from --json. Asked about directly
+// ("do we measure job run exec time?"), which is what surfaced it.
+func TestRunsAndShowDisplayDuration(t *testing.T) {
+	e := newEnv(t)
+	work := t.TempDir()
+	e.run("add", "timed", "--kind", "cli", "--cron", "0 0 * * *", "--cwd", work, "--cmd", "sleep 1")
+	e.run("run", "timed")
+
+	runsOut := e.run("runs", "timed")
+	if !strings.Contains(runsOut, "DURATION") {
+		t.Fatalf("runs table missing a DURATION column: %s", runsOut)
+	}
+	// Millisecond-precision now (e.g. "1.002s"), not rounded to whole
+	// seconds — check the pattern rather than an exact rounded value.
+	durationRE := regexp.MustCompile(`\b1(\.\d+)?s\b`)
+	if !durationRE.MatchString(runsOut) {
+		t.Fatalf("expected a ~1s duration in runs output, got: %s", runsOut)
+	}
+
+	showOut := e.run("show", "timed")
+	if !durationRE.MatchString(showOut) {
+		t.Fatalf("expected a ~1s duration in show's recent-runs output, got: %s", showOut)
 	}
 }
 

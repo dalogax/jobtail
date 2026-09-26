@@ -39,11 +39,55 @@ CREATE TABLE IF NOT EXISTS runs (
   finished_at   TEXT,
   exit_code     INTEGER,
   session_id    TEXT,
-  log_path      TEXT NOT NULL
+  log_path      TEXT NOT NULL,
+  duration_ms   INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_runs_job ON runs(job_id, started_at DESC);
 `
+
+// additiveMigrations runs schema changes that came after the initial
+// release, against a database that may already exist without them.
+// started_at can't double as an execution-duration basis on its own: for
+// a scheduled run it's deliberately the nominal cron slot (not the actual
+// moment run-exec began), so that catch-up after a gap advances one slot
+// at a time instead of silently skipping backlogged ones — but that same
+// property means finished_at-started_at can read as a wildly inflated
+// duration (measured up to 60s for a run that actually took 30ms, once
+// ticks had fallen behind). duration_ms is measured directly around the
+// actual execution instead, so it never conflates scheduling delay with
+// real run time.
+func additiveMigrations(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(runs)`)
+	if err != nil {
+		return err
+	}
+	hasDurationMs := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "duration_ms" {
+			hasDurationMs = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+
+	if !hasDurationMs {
+		if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN duration_ms INTEGER`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 type Job struct {
 	ID             string
@@ -73,6 +117,11 @@ type Run struct {
 	ExitCode   sql.NullInt64
 	SessionID  sql.NullString
 	LogPath    string
+	// DurationMs is measured directly around the actual execution — see
+	// additiveMigrations' comment for why this can't just be derived from
+	// FinishedAt-StartedAt. Null for runs recorded before this field
+	// existed; display code falls back to the timestamp difference then.
+	DurationMs sql.NullInt64
 }
 
 // JobSummary is a Job plus derived run stats, as shown in `list`/the TUI job pane.
@@ -98,6 +147,10 @@ func Open(path string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1) // modernc.org/sqlite: one *connection* per process is simplest and avoids intra-process lock churn; cross-process concurrency is handled by WAL + busy_timeout above.
 	if _, err := db.Exec(schema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	if err := additiveMigrations(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
@@ -381,10 +434,10 @@ func (s *Store) SetRunSessionID(ctx context.Context, runID, sessionID string) er
 	return err
 }
 
-func (s *Store) FinishRun(ctx context.Context, runID, status string, exitCode int, finishedAt time.Time) error {
+func (s *Store) FinishRun(ctx context.Context, runID, status string, exitCode int, finishedAt time.Time, durationMs int64) error {
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE runs SET status = ?, exit_code = ?, finished_at = ? WHERE id = ?`,
-		status, exitCode, timeToStr(finishedAt), runID)
+		UPDATE runs SET status = ?, exit_code = ?, finished_at = ?, duration_ms = ? WHERE id = ?`,
+		status, exitCode, timeToStr(finishedAt), durationMs, runID)
 	if err != nil {
 		return err
 	}
@@ -393,7 +446,7 @@ func (s *Store) FinishRun(ctx context.Context, runID, status string, exitCode in
 
 func (s *Store) GetRun(ctx context.Context, id string) (Run, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, job_id, trigger, status, started_at, finished_at, exit_code, session_id, log_path
+		SELECT id, job_id, trigger, status, started_at, finished_at, exit_code, session_id, log_path, duration_ms
 		FROM runs WHERE id = ?`, id)
 	return scanRun(row)
 }
@@ -402,8 +455,8 @@ func scanRun(row *sql.Row) (Run, error) {
 	var r Run
 	var startedAt string
 	var finishedAt, sessionID sql.NullString
-	var exitCode sql.NullInt64
-	err := row.Scan(&r.ID, &r.JobID, &r.Trigger, &r.Status, &startedAt, &finishedAt, &exitCode, &sessionID, &r.LogPath)
+	var exitCode, durationMs sql.NullInt64
+	err := row.Scan(&r.ID, &r.JobID, &r.Trigger, &r.Status, &startedAt, &finishedAt, &exitCode, &sessionID, &r.LogPath, &durationMs)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Run{}, ErrNotFound
 	}
@@ -421,6 +474,7 @@ func scanRun(row *sql.Row) (Run, error) {
 		r.FinishedAt = sql.NullTime{Time: t, Valid: true}
 	}
 	r.ExitCode = exitCode
+	r.DurationMs = durationMs
 	r.SessionID = sessionID
 	return r, nil
 }
@@ -430,7 +484,7 @@ func (s *Store) ListRuns(ctx context.Context, jobID string, limit int) ([]Run, e
 		limit = 200
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, job_id, trigger, status, started_at, finished_at, exit_code, session_id, log_path
+		SELECT id, job_id, trigger, status, started_at, finished_at, exit_code, session_id, log_path, duration_ms
 		FROM runs WHERE job_id = ? ORDER BY started_at DESC LIMIT ?`, jobID, limit)
 	if err != nil {
 		return nil, err
@@ -441,8 +495,8 @@ func (s *Store) ListRuns(ctx context.Context, jobID string, limit int) ([]Run, e
 		var r Run
 		var startedAt string
 		var finishedAt, sessionID sql.NullString
-		var exitCode sql.NullInt64
-		if err := rows.Scan(&r.ID, &r.JobID, &r.Trigger, &r.Status, &startedAt, &finishedAt, &exitCode, &sessionID, &r.LogPath); err != nil {
+		var exitCode, durationMs sql.NullInt64
+		if err := rows.Scan(&r.ID, &r.JobID, &r.Trigger, &r.Status, &startedAt, &finishedAt, &exitCode, &sessionID, &r.LogPath, &durationMs); err != nil {
 			return nil, err
 		}
 		if r.StartedAt, err = strToTime(startedAt); err != nil {
@@ -456,6 +510,7 @@ func (s *Store) ListRuns(ctx context.Context, jobID string, limit int) ([]Run, e
 			r.FinishedAt = sql.NullTime{Time: t, Valid: true}
 		}
 		r.ExitCode = exitCode
+		r.DurationMs = durationMs
 		r.SessionID = sessionID
 		out = append(out, r)
 	}
@@ -465,7 +520,7 @@ func (s *Store) ListRuns(ctx context.Context, jobID string, limit int) ([]Run, e
 // LastRun returns the most recent run for a job matching one of the given
 // triggers (pass nil for any trigger), or ErrNotFound if there is none.
 func (s *Store) LastRun(ctx context.Context, jobID string, triggers ...string) (Run, error) {
-	q := `SELECT id, job_id, trigger, status, started_at, finished_at, exit_code, session_id, log_path
+	q := `SELECT id, job_id, trigger, status, started_at, finished_at, exit_code, session_id, log_path, duration_ms
 		FROM runs WHERE job_id = ?`
 	args := []any{jobID}
 	if len(triggers) > 0 {

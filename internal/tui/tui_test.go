@@ -59,7 +59,7 @@ func seedStore(t *testing.T) (*store.Store, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.FinishRun(ctx, run.ID, "ok", 0, time.Now()); err != nil {
+	if err := st.FinishRun(ctx, run.ID, "ok", 0, time.Now(), 250); err != nil {
 		t.Fatal(err)
 	}
 	return st, logsDir

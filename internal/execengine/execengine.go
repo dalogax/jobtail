@@ -36,11 +36,18 @@ type Result struct {
 	Status    string // "ok" | "failed" | "timeout"
 	ExitCode  int
 	SessionID string // agent jobs only
+	// Duration is measured directly around the actual exec.Cmd run, not
+	// derived from the run row's started_at/finished_at afterward: for a
+	// scheduled run, started_at is deliberately the nominal cron slot (see
+	// store's additiveMigrations comment), which can make a timestamp-diff
+	// duration read as minutes when the real run took milliseconds.
+	Duration time.Duration
 }
 
 // RunCLI executes job.Command via `sh -c` in job.Cwd, capturing combined
 // stdout+stderr to logPath (capped at LogCapBytes).
 func RunCLI(ctx context.Context, j store.Job, logPath string) (Result, error) {
+	start := time.Now()
 	ctx, cancel := withJobTimeout(ctx, j)
 	defer cancel()
 
@@ -58,7 +65,7 @@ func RunCLI(ctx context.Context, j store.Job, logPath string) (Result, error) {
 	cmd.Cancel = terminateThenKill(cmd)
 
 	err = cmd.Run()
-	return classifyExit(ctx, cmd, err)
+	return classifyExit(ctx, cmd, err, start)
 }
 
 // RunAgent runs `claude -p <prompt> --output-format stream-json ...` in
@@ -67,6 +74,7 @@ func RunCLI(ctx context.Context, j store.Job, logPath string) (Result, error) {
 // onSessionID (so a run that later fails is still resumable — PRD §12
 // decision 6). The final `result` event's is_error field decides ok/failed.
 func RunAgent(ctx context.Context, j store.Job, logPath string, onSessionID func(sessionID string)) (Result, error) {
+	start := time.Now()
 	ctx, cancel := withJobTimeout(ctx, j)
 	defer cancel()
 
@@ -132,7 +140,7 @@ func RunAgent(ctx context.Context, j store.Job, logPath string, onSessionID func
 	scanErr := scanner.Err()
 	waitErr := cmd.Wait()
 
-	res, err := classifyExit(ctx, cmd, waitErr)
+	res, err := classifyExit(ctx, cmd, waitErr, start)
 	if err != nil {
 		return res, err
 	}
@@ -183,22 +191,23 @@ func terminateThenKill(cmd *exec.Cmd) func() error {
 	}
 }
 
-func classifyExit(ctx context.Context, cmd *exec.Cmd, runErr error) (Result, error) {
+func classifyExit(ctx context.Context, cmd *exec.Cmd, runErr error, start time.Time) (Result, error) {
+	dur := time.Since(start)
 	exitCode := 0
 	if cmd.ProcessState != nil {
 		exitCode = cmd.ProcessState.ExitCode()
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return Result{Status: "timeout", ExitCode: exitCode}, nil
+		return Result{Status: "timeout", ExitCode: exitCode, Duration: dur}, nil
 	}
 	var exitErr *exec.ExitError
 	if runErr != nil && !errors.As(runErr, &exitErr) {
-		return Result{Status: "failed", ExitCode: exitCode}, runErr
+		return Result{Status: "failed", ExitCode: exitCode, Duration: dur}, runErr
 	}
 	if exitCode != 0 {
-		return Result{Status: "failed", ExitCode: exitCode}, nil
+		return Result{Status: "failed", ExitCode: exitCode, Duration: dur}, nil
 	}
-	return Result{Status: "ok", ExitCode: 0}, nil
+	return Result{Status: "ok", ExitCode: 0, Duration: dur}, nil
 }
 
 // capWriter forwards up to `cap` bytes to the underlying writer, then

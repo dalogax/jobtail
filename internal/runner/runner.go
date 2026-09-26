@@ -39,7 +39,7 @@ func Finish(ctx context.Context, st *store.Store, j store.Job, runID string, res
 	if status == "" {
 		status = "failed"
 	}
-	if err := st.FinishRun(ctx, runID, status, res.ExitCode, time.Now()); err != nil {
+	if err := st.FinishRun(ctx, runID, status, res.ExitCode, time.Now(), res.Duration.Milliseconds()); err != nil {
 		return err
 	}
 	if status == "failed" || status == "timeout" {

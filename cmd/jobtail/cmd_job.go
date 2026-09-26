@@ -15,6 +15,23 @@ import (
 	"github.com/dalogax/jobtail/internal/store"
 )
 
+// runDuration is how long a run took, or "-" if it's still running (no
+// finished_at yet) — the plain-text `show`/`runs` output only ever showed
+// started_at, leaving duration visible nowhere outside --json or the TUI's
+// own "Dur" column.
+func runDuration(r store.Run) string {
+	if r.DurationMs.Valid {
+		return time.Duration(r.DurationMs.Int64 * int64(time.Millisecond)).Round(time.Millisecond).String()
+	}
+	// Pre-migration rows have no duration_ms; fall back to the old (less
+	// accurate for scheduled runs — see additiveMigrations) calculation
+	// rather than showing nothing for historical data.
+	if !r.FinishedAt.Valid {
+		return "-"
+	}
+	return r.FinishedAt.Time.Sub(r.StartedAt).Round(time.Second).String()
+}
+
 // resolveCwd turns whatever --cwd the caller typed (relative or absolute)
 // into an absolute path, resolved against the CLI's own working directory
 // at the moment of the call, and confirms it actually exists.
@@ -206,7 +223,7 @@ func newShowCmd() *cobra.Command {
 			fmt.Fprintf(out, "keep:            %d\n", j.Keep)
 			fmt.Fprintln(out, "recent runs:")
 			for _, r := range runs {
-				fmt.Fprintf(out, "  %s  %-8s %-16s %s\n", r.ID, r.Status, r.Trigger, r.StartedAt.Local().Format(time.RFC3339))
+				fmt.Fprintf(out, "  %s  %-8s %-16s %s  %s\n", r.ID, r.Status, r.Trigger, r.StartedAt.Local().Format(time.RFC3339), runDuration(r))
 			}
 			return nil
 		},
@@ -237,13 +254,13 @@ func newRunsCmd() *cobra.Command {
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(runs)
 			}
 			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 2, 2, ' ', 0)
-			fmt.Fprintln(tw, "RUN ID\tSTATUS\tTRIGGER\tSTARTED\tEXIT")
+			fmt.Fprintln(tw, "RUN ID\tSTATUS\tTRIGGER\tSTARTED\tDURATION\tEXIT")
 			for _, r := range runs {
 				exit := "-"
 				if r.ExitCode.Valid {
 					exit = fmt.Sprint(r.ExitCode.Int64)
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", r.ID, r.Status, r.Trigger, r.StartedAt.Local().Format(time.RFC3339), exit)
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", r.ID, r.Status, r.Trigger, r.StartedAt.Local().Format(time.RFC3339), runDuration(r), exit)
 			}
 			return tw.Flush()
 		},

@@ -109,13 +109,16 @@ CREATE TABLE runs (
   finished_at   TEXT,
   exit_code     INTEGER,
   session_id    TEXT,                       -- kind='agent' only: claude session id, for --resume
-  log_path      TEXT NOT NULL
+  log_path      TEXT NOT NULL,
+  duration_ms   INTEGER                     -- measured directly around the exec.Cmd run; see note below
 );
 
 CREATE INDEX idx_runs_job ON runs(job_id, started_at DESC);
 ```
 
 `run_count` and `last_status` shown in the job list are `SELECT count(*)` / latest `runs` row — not duplicated columns, to keep them always correct.
+
+`duration_ms` deliberately isn't `finished_at - started_at`: for a scheduled run, `started_at` is the nominal cron slot (§12 decision — needed so catch-up after a gap advances one slot at a time instead of silently skipping backlogged ones), not the moment `run-exec` actually began. If ticks fall behind, that gap alone can make a run that took 30ms read as a minute long. `duration_ms` is measured directly around the actual `exec.Cmd` run instead, so it never conflates scheduling delay with real execution time. Added via an additive migration (`ALTER TABLE runs ADD COLUMN`, guarded by a `PRAGMA table_info` check) rather than bumping the whole schema, since this was found and fixed against a real, already-populated database, not before first use.
 
 Log retention: default keep last 200 run rows + log files per job (`jobtail gc`, also run opportunistically at the end of `jobtail tick`); configurable per job (`--keep N`). This is deliberately *not* the herdr-sched approach (windowed to newest 1000 *events*, which quietly discards history) — `jobtail` keeps full per-run rows up to the retention count, so "how many times has this run, ever" (lifetime counter, separate from retained rows) stays accurate even after old logs are pruned.
 
