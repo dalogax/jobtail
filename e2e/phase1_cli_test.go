@@ -5,6 +5,7 @@ package e2e
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -334,6 +335,15 @@ func TestInstallSystemdWritesUnits(t *testing.T) {
 		t.Fatalf("timer unit missing expected OnCalendar line: %s", data)
 	}
 
+	svcData, _ := os.ReadFile(svc)
+	if !strings.Contains(string(svcData), "KillMode=process") {
+		t.Fatalf(`service unit missing "KillMode=process" — without it, systemd's default
+KillMode=control-group kills every run-exec tick just spawned the instant
+tick itself exits (confirmed live on a real box: jobs got stuck in
+"running" forever and their log files were never even created):
+%s`, svcData)
+	}
+
 	// A syntactically plausible OnCalendar value isn't the same as one
 	// systemd actually accepts (an earlier draft here wrote
 	// "*-*-*-*:*:00" — four date fields instead of three — which
@@ -347,5 +357,52 @@ func TestInstallSystemdWritesUnits(t *testing.T) {
 		}
 	} else {
 		t.Skip("systemd-analyze not on PATH; skipping unit-file validation")
+	}
+}
+
+// TestDetachedGrandchildSurvivesOneshotUnitExit is a real-systemd regression
+// test for the bug the live install on this box actually hit: a Type=oneshot
+// unit's detached grandchild process getting killed the instant the unit's
+// own main process exits, because systemd's default KillMode=control-group
+// sweeps the whole cgroup on unit deactivation — not just on an explicit
+// stop. It reproduces jobtail-tick.service's exact shape (spawn a detached
+// child, exit 0 immediately) via a uniquely-named transient unit, so it
+// can't collide with (or ever touch) a real jobtail-tick.service on this
+// machine. Skips cleanly wherever no systemd --user session is reachable
+// (e.g. most CI runners), rather than failing the test-as-release-gate.
+func TestDetachedGrandchildSurvivesOneshotUnitExit(t *testing.T) {
+	if _, err := exec.LookPath("systemd-run"); err != nil {
+		t.Skip("systemd-run not on PATH")
+	}
+	if out, err := exec.Command("systemctl", "--user", "status").CombinedOutput(); err != nil {
+		t.Skipf("no reachable systemd --user session: %v\n%s", err, out)
+	}
+
+	marker := filepath.Join(t.TempDir(), "survived")
+	unit := fmt.Sprintf("jobtail-e2e-killmode-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		exec.Command("systemctl", "--user", "reset-failed", unit+".service").Run()
+	})
+
+	// Exactly jobtail-tick.service's shape: a oneshot main process that
+	// backgrounds a grandchild and returns immediately, carrying the same
+	// KillMode=process property cmd_systemd.go's serviceUnit template sets.
+	bg := fmt.Sprintf("setsid sh -c 'sleep 1; touch %s' >/dev/null 2>&1 & disown; exit 0", marker)
+	out, err := exec.Command("systemd-run", "--user", "--unit="+unit,
+		"--property=Type=oneshot", "--property=KillMode=process", "--wait",
+		"--", "sh", "-c", bg).CombinedOutput()
+	if err != nil {
+		t.Fatalf("systemd-run: %v\n%s", err, out)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the detached grandchild did not survive its oneshot unit's exit — KillMode=process should prevent systemd from killing it")
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
