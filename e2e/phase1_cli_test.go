@@ -330,7 +330,22 @@ func TestInstallSystemdWritesUnits(t *testing.T) {
 		}
 	}
 	data, _ := os.ReadFile(timer)
-	if !strings.Contains(string(data), "OnCalendar=*-*-*-*:*:00") {
+	if !strings.Contains(string(data), "OnCalendar=minutely") {
 		t.Fatalf("timer unit missing expected OnCalendar line: %s", data)
+	}
+
+	// A syntactically plausible OnCalendar value isn't the same as one
+	// systemd actually accepts (an earlier draft here wrote
+	// "*-*-*-*:*:00" — four date fields instead of three — which
+	// systemd-analyze verify caught immediately but a bare substring check
+	// on the string would not have). Verify against the real systemd unit
+	// validator rather than trusting the file's own text.
+	if _, err := exec.LookPath("systemd-analyze"); err == nil {
+		out, err := exec.Command("systemd-analyze", "verify", svc, timer).CombinedOutput()
+		if err != nil {
+			t.Fatalf("systemd-analyze verify rejected the generated units: %v\n%s", err, out)
+		}
+	} else {
+		t.Skip("systemd-analyze not on PATH; skipping unit-file validation")
 	}
 }

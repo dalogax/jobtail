@@ -24,7 +24,7 @@ const timerUnit = `[Unit]
 Description=jobtail: run jobtail-tick.service every minute
 
 [Timer]
-OnCalendar=*-*-*-*:*:00
+OnCalendar=minutely
 Persistent=true
 
 [Install]
