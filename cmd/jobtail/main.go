@@ -1,5 +1,5 @@
 // Command jobtail schedules and watches recurring jobs — plain shell
-// commands or headless Claude Code agent turns — for a Herdr-based dev box.
+// commands or headless Claude Code agent turns — from a terminal dashboard.
 // See PRD.md at the repo root for the full design.
 package main
 
@@ -82,14 +82,14 @@ func (a *app) logPath(runID string) string {
 func main() {
 	root := &cobra.Command{
 		Use:           "jobtail",
-		Short:         "Schedule and watch recurring cli/agent jobs for Herdr",
+		Short:         "Schedule and watch recurring cli/agent jobs from a terminal dashboard",
 		Version:       currentVersion(),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Args:          cobra.NoArgs,
 		// Bare `jobtail`, no subcommand: open the dashboard directly
 		// rather than printing help — this is the common case for a
-		// tool meant to live in a Herdr tab.
+		// tool meant to be opened in its own tab/pane and left running.
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return openDashboard()
 		},

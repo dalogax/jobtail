@@ -1,7 +1,6 @@
 // Package tui is jobtail's Bubble Tea dashboard: jobs -> runs -> log,
-// three panes, meant to run inside a Herdr tab (PRD §9). Bare command, no
-// Herdr plugin manifest required (PRD §8) — `jobtail tui` is a plain
-// terminal program.
+// three panes, a plain terminal program that runs in any tab or pane —
+// including a Herdr tab (PRD §9), with no plugin manifest required.
 package tui
 
 import (

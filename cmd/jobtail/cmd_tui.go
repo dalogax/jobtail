@@ -11,7 +11,7 @@ import (
 func newTUICmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "tui",
-		Short: "Open the jobs -> runs -> log dashboard (run this inside a Herdr tab)",
+		Short: "Open the jobs -> runs -> log dashboard",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return openDashboard()
