@@ -15,6 +15,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -112,7 +113,7 @@ func TestTUINavigatesJobsToRunsToLog(t *testing.T) {
 	st, logsDir := seedStore(t)
 	m := newModel(st, logsDir)
 
-	m = send(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = send(t, m, tea.WindowSizeMsg{Width: 172, Height: 40})
 	m = resolve(t, m, m.Init())
 
 	if !strings.Contains(m.View(), "greet") {
@@ -177,7 +178,7 @@ func TestMouseClickSelectsRowAndSwitchesPane(t *testing.T) {
 	st, logsDir := seedStore(t)
 	addSecondJob(t, st)
 	m := newModel(st, logsDir)
-	m = send(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = send(t, m, tea.WindowSizeMsg{Width: 172, Height: 40})
 	m = resolve(t, m, m.Init())
 
 	if got := m.selectedJobID(); got != "abbey" {
@@ -194,22 +195,82 @@ func TestMouseClickSelectsRowAndSwitchesPane(t *testing.T) {
 		t.Fatalf("clicking in the jobs pane's x-range should focus it, got %v", m.focus)
 	}
 
-	third := m.width / 3
-	m = send(t, m, tea.MouseMsg{X: third + 5, Y: 4, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	// Use the model's own computed box widths, not an independently
+	// guessed third of the screen — jobs and runs have different column
+	// counts and so different real widths (this is exactly the bug that
+	// broke real mouse clicks: the boundary math and the render math
+	// disagreed with each other).
+	m = send(t, m, tea.MouseMsg{X: m.jobsBoxWidth + 5, Y: 4, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
 	if m.focus != focusRuns {
 		t.Fatalf("clicking in the runs pane's x-range should focus it, got %v", m.focus)
 	}
 
-	m = send(t, m, tea.MouseMsg{X: 2*third + 5, Y: 4, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	m = send(t, m, tea.MouseMsg{X: m.jobsBoxWidth + m.runsBoxWidth + 5, Y: 4, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
 	if m.focus != focusLog {
 		t.Fatalf("clicking in the log pane's x-range should focus it, got %v", m.focus)
 	}
 }
 
+var ansiRE = regexp.MustCompile("\x1b\\[[0-9;]*[a-zA-Z]")
+
+// TestMouseBoundariesMatchActualRenderedBorders is the regression test for
+// the real bug this session found live: handleMouse computed pane
+// boundaries from an even width/3 split, while the renderer gave jobs and
+// runs their own widths based on column count (different for each table).
+// The two disagreed, so clicks landing in the visual gap between them
+// resolved to the wrong pane — invisible to every other test here because
+// none of them cross-checked hit-testing math against the rendered
+// output. This parses m.View() itself and asserts the border characters
+// really do sit at jobsBoxWidth / jobsBoxWidth+runsBoxWidth.
+func TestMouseBoundariesMatchActualRenderedBorders(t *testing.T) {
+	st, logsDir := seedStore(t)
+	m := newModel(st, logsDir)
+	m = send(t, m, tea.WindowSizeMsg{Width: 172, Height: 40})
+	m = resolve(t, m, m.Init())
+
+	lines := strings.Split(m.View(), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("view has too few lines: %d", len(lines))
+	}
+	line := []rune(ansiRE.ReplaceAllString(lines[1], "")) // title row: "Jobs ... Runs: ... Log: ..."
+
+	borderCols := []int{}
+	for i, r := range line {
+		if r == '│' {
+			borderCols = append(borderCols, i)
+		}
+	}
+	// Expect 6: jobs' left edge, the adjacent pair where jobs' right
+	// border meets runs' left border, the adjacent pair where runs' right
+	// border meets log's left border, and log's own right edge.
+	if len(borderCols) != 6 {
+		t.Fatalf("expected 6 vertical border characters on the title row (left edge + 2 adjacent pairs + right edge), found %d: %q",
+			len(borderCols), string(line))
+	}
+
+	// Allow off-by-one: a boundary can land on either half of an adjacent
+	// border pair depending on box-drawing specifics.
+	if d := abs(borderCols[1] - m.jobsBoxWidth); d > 1 {
+		t.Fatalf("jobs|runs border rendered at column %d, but jobsBoxWidth=%d (mouse clicks there would hit the wrong pane)",
+			borderCols[1], m.jobsBoxWidth)
+	}
+	if d := abs(borderCols[3] - (m.jobsBoxWidth + m.runsBoxWidth)); d > 1 {
+		t.Fatalf("runs|log border rendered at column %d, but jobsBoxWidth+runsBoxWidth=%d (mouse clicks there would hit the wrong pane)",
+			borderCols[3], m.jobsBoxWidth+m.runsBoxWidth)
+	}
+}
+
+func abs(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
 func TestMouseClickOutOfRangeIsIgnoredNotACrash(t *testing.T) {
 	st, logsDir := seedStore(t)
 	m := newModel(st, logsDir)
-	m = send(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = send(t, m, tea.WindowSizeMsg{Width: 172, Height: 40})
 	m = resolve(t, m, m.Init())
 
 	before := m.selectedJobID()
@@ -224,7 +285,7 @@ func TestMouseWheelMovesJobSelection(t *testing.T) {
 	st, logsDir := seedStore(t)
 	addSecondJob(t, st)
 	m := newModel(st, logsDir)
-	m = send(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = send(t, m, tea.WindowSizeMsg{Width: 172, Height: 40})
 	m = resolve(t, m, m.Init())
 
 	if got := m.selectedJobID(); got != "abbey" {
@@ -240,7 +301,7 @@ func TestTUIRunNowExecutesThroughRunner(t *testing.T) {
 	st, logsDir := seedStore(t)
 	m := newModel(st, logsDir)
 
-	m = send(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = send(t, m, tea.WindowSizeMsg{Width: 172, Height: 40})
 	m = resolve(t, m, m.Init())
 
 	before, err := st.ListRuns(context.Background(), "greet", 200)

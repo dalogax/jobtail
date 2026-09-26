@@ -63,6 +63,15 @@ type model struct {
 	err           error
 	statusMsg     string
 	running       map[string]bool // job IDs with an in-flight "run now" from the TUI
+
+	// jobsBoxWidth/runsBoxWidth are each pane's true rendered width
+	// (table content + border/padding chrome), set by layout(). Mouse
+	// hit-testing must use these, not a naive width/3: jobs and runs have
+	// different column counts, so their real widths differ from each
+	// other and from an even third (confirmed by measuring an actual
+	// rendered frame — boundaries landed at columns 67 and 131 on a
+	// 172-wide screen, not the 57/114 an even split would predict).
+	jobsBoxWidth, runsBoxWidth int
 }
 
 // Run opens the dashboard. It blocks until the user quits.
@@ -260,15 +269,25 @@ func (m *model) layout() {
 		paneWidth = 10
 	}
 
+	// boxChrome: each pane's Border(NormalBorder) contributes 2 columns
+	// (left+right border) and its Padding(0,1) contributes 2 more
+	// (left+right padding) — 4 total, on top of the table's own content
+	// width. Getting this wrong is exactly what broke mouse hit-testing.
+	const boxChrome = 4
+
 	jobCols := jobsColumns(paneWidth)
 	m.jobsTable.SetColumns(jobCols)
-	m.jobsTable.SetWidth(columnsWidth(jobCols))
+	jobsContentWidth := columnsWidth(jobCols)
+	m.jobsTable.SetWidth(jobsContentWidth)
+	m.jobsBoxWidth = jobsContentWidth + boxChrome
 
 	runCols := runsColumns(paneWidth)
 	m.runsTable.SetColumns(runCols)
-	m.runsTable.SetWidth(columnsWidth(runCols))
+	runsContentWidth := columnsWidth(runCols)
+	m.runsTable.SetWidth(runsContentWidth)
+	m.runsBoxWidth = runsContentWidth + boxChrome
 
-	m.logVP.Width = m.width - 2*third - 4
+	m.logVP.Width = m.width - m.jobsBoxWidth - m.runsBoxWidth - boxChrome
 	h := m.height - 6
 	if h < 3 {
 		h = 3
@@ -384,12 +403,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // jobs/runs/log occupy the left/middle/right third of the screen — and, for
 // a left-click, to a row within that pane's table.
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	third := m.width / 3
 	pane := focusLog
 	switch {
-	case msg.X < third:
+	case msg.X < m.jobsBoxWidth:
 		pane = focusJobs
-	case msg.X < 2*third:
+	case msg.X < m.jobsBoxWidth+m.runsBoxWidth:
 		pane = focusRuns
 	}
 
