@@ -1,4 +1,4 @@
-module github.com/jarvis0064/jobtail
+module github.com/dalogax/jobtail
 
 go 1.27.1
 

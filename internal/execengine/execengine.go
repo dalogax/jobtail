@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jarvis0064/jobtail/internal/store"
+	"github.com/dalogax/jobtail/internal/store"
 )
 
 // LogCapBytes caps how much of a run's output is captured to its log file

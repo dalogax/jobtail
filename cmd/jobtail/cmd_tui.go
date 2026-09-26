@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/jarvis0064/jobtail/internal/tui"
+	"github.com/dalogax/jobtail/internal/tui"
 )
 
 func newTUICmd() *cobra.Command {

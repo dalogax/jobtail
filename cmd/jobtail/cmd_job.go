@@ -10,8 +10,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/jarvis0064/jobtail/internal/cronx"
-	"github.com/jarvis0064/jobtail/internal/store"
+	"github.com/dalogax/jobtail/internal/cronx"
+	"github.com/dalogax/jobtail/internal/store"
 )
 
 func newAddCmd() *cobra.Command {

@@ -21,7 +21,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jarvis0064/jobtail/internal/store"
+	"github.com/dalogax/jobtail/internal/store"
 )
 
 func init() {

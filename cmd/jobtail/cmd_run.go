@@ -12,10 +12,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
-	"github.com/jarvis0064/jobtail/internal/cronx"
-	"github.com/jarvis0064/jobtail/internal/execengine"
-	"github.com/jarvis0064/jobtail/internal/runner"
-	"github.com/jarvis0064/jobtail/internal/store"
+	"github.com/dalogax/jobtail/internal/cronx"
+	"github.com/dalogax/jobtail/internal/execengine"
+	"github.com/dalogax/jobtail/internal/runner"
+	"github.com/dalogax/jobtail/internal/store"
 )
 
 // extractPaneID pulls the new pane's ID out of `herdr tab create --json`'s

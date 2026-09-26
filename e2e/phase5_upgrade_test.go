@@ -32,7 +32,7 @@ func fakeRelease(t *testing.T, latestTag, assetBody string) (baseURL string, hit
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	mux.HandleFunc("/repos/jarvis0064/jobtail/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/repos/dalogax/jobtail/releases/latest", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(hits, 1)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
@@ -240,7 +240,7 @@ func TestUpgradeErrorsWithoutMatchingAsset(t *testing.T) {
 	e := newEnv(t)
 	// A release with no asset at all for this platform.
 	mux := http.NewServeMux()
-	mux.HandleFunc("/repos/jarvis0064/jobtail/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/repos/dalogax/jobtail/releases/latest", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"tag_name": "v2.0.0", "assets": []map[string]string{}})
 	})
 	srv := httptest.NewServer(mux)

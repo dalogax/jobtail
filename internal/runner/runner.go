@@ -12,8 +12,8 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/jarvis0064/jobtail/internal/execengine"
-	"github.com/jarvis0064/jobtail/internal/store"
+	"github.com/dalogax/jobtail/internal/execengine"
+	"github.com/dalogax/jobtail/internal/store"
 )
 
 // Execute dispatches by job kind and runs to completion in-process.

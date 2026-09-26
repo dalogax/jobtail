@@ -1,12 +1,12 @@
 #!/bin/sh
 # Installs the latest jobtail release binary.
 #
-#   curl -fsSL https://raw.githubusercontent.com/jarvis0064/jobtail/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/dalogax/jobtail/main/install.sh | sh
 #
 # Override the install directory with INSTALL_DIR (default: ~/.local/bin).
 set -eu
 
-REPO="jarvis0064/jobtail"
+REPO="dalogax/jobtail"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
 os() {

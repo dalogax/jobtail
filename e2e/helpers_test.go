@@ -31,7 +31,7 @@ func binary(t *testing.T) string {
 			return
 		}
 		binPath = filepath.Join(dir, "jobtail")
-		cmd := exec.Command("go", "build", "-o", binPath, "github.com/jarvis0064/jobtail/cmd/jobtail")
+		cmd := exec.Command("go", "build", "-o", binPath, "github.com/dalogax/jobtail/cmd/jobtail")
 		cmd.Dir = repoRoot()
 		out, err := cmd.CombinedOutput()
 		if err != nil {

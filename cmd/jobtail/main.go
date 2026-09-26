@@ -11,8 +11,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/jarvis0064/jobtail/internal/selfupdate"
-	"github.com/jarvis0064/jobtail/internal/store"
+	"github.com/dalogax/jobtail/internal/selfupdate"
+	"github.com/dalogax/jobtail/internal/store"
 )
 
 // version is set at release-build time via -ldflags "-X main.version=vX.Y.Z"

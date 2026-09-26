@@ -18,7 +18,7 @@ import (
 )
 
 // Repo is the GitHub repo releases are published to.
-const Repo = "jarvis0064/jobtail"
+const Repo = "dalogax/jobtail"
 
 // checkInterval is how often CheckForUpdate actually hits the network; in
 // between, it trusts its cached last result.

@@ -10,7 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/mod/semver"
 
-	"github.com/jarvis0064/jobtail/internal/selfupdate"
+	"github.com/dalogax/jobtail/internal/selfupdate"
 )
 
 func newUpgradeCmd() *cobra.Command {

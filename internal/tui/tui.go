@@ -15,9 +15,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/jarvis0064/jobtail/internal/cronx"
-	"github.com/jarvis0064/jobtail/internal/runner"
-	"github.com/jarvis0064/jobtail/internal/store"
+	"github.com/dalogax/jobtail/internal/cronx"
+	"github.com/dalogax/jobtail/internal/runner"
+	"github.com/dalogax/jobtail/internal/store"
 )
 
 // focusPane is which of the three panes has keyboard focus.
