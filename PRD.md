@@ -227,6 +227,7 @@ Three-pane layout inside a Herdr tab (opened per §8 — either a plain `jobtail
 - Live tail: if the selected run's `status='running'`, the log pane tails the file (`fsnotify`/poll) instead of a static read.
 - `e`/`r` act on the job/run under the cursor immediately via the same code path as the CLI (no separate "TUI-only" logic to keep in sync).
 - Refresh: poll SQLite every ~1s for list panes; this is a personal single-writer box, no need for push/subscribe.
+- Mouse: click a job/run row to select it (and switch focus to that pane); click anywhere in a pane to focus it; wheel scrolls whichever pane the cursor is over (job/run cursor moves a row per notch, the log viewport scrolls a line per notch). Keyboard remains the primary/complete interface — mouse is additive, not required.
 
 ## 10. Execution engine
 

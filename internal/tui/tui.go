@@ -68,7 +68,7 @@ type model struct {
 // Run opens the dashboard. It blocks until the user quits.
 func Run(st *store.Store, logsDir string) error {
 	m := newModel(st, logsDir)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err
 }
@@ -243,6 +243,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 	}
 	return m, nil
 }
@@ -375,6 +378,106 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.logVP, cmd = m.logVP.Update(msg)
 	}
 	return m, cmd
+}
+
+// handleMouse maps a click/wheel event's terminal (X, Y) to a pane —
+// jobs/runs/log occupy the left/middle/right third of the screen — and, for
+// a left-click, to a row within that pane's table.
+func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	third := m.width / 3
+	pane := focusLog
+	switch {
+	case msg.X < third:
+		pane = focusJobs
+	case msg.X < 2*third:
+		pane = focusRuns
+	}
+
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		return m.scroll(pane, -1)
+	case tea.MouseButtonWheelDown:
+		return m.scroll(pane, 1)
+	}
+
+	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+		return m, nil
+	}
+	m.focus = pane
+
+	row, ok := rowAtY(msg.Y)
+	if !ok {
+		return m, nil
+	}
+	switch pane {
+	case focusJobs:
+		if row >= len(m.jobs) {
+			return m, nil
+		}
+		prevID := m.selectedJobID()
+		m.jobsTable.SetCursor(row)
+		if newID := m.selectedJobID(); newID != prevID && newID != "" {
+			return m, reloadRunsCmd(m.ctx, m.st, newID)
+		}
+	case focusRuns:
+		if row >= len(m.runs) {
+			return m, nil
+		}
+		prevID, _ := m.selectedRun()
+		m.runsTable.SetCursor(row)
+		if newID, path := m.selectedRun(); newID != prevID && newID != "" {
+			return m, reloadLogCmd(newID, path)
+		}
+	}
+	return m, nil
+}
+
+// scroll handles a wheel event over a pane: moves the table cursor (jobs,
+// runs) or scrolls the log viewport, and focuses whichever pane the wheel
+// was over — matching ordinary "scroll wherever the mouse is" behavior.
+func (m model) scroll(pane focusPane, dir int) (tea.Model, tea.Cmd) {
+	m.focus = pane
+	switch pane {
+	case focusJobs:
+		if dir < 0 {
+			m.jobsTable.MoveUp(1)
+		} else {
+			m.jobsTable.MoveDown(1)
+		}
+		if newID := m.selectedJobID(); newID != "" {
+			return m, reloadRunsCmd(m.ctx, m.st, newID)
+		}
+	case focusRuns:
+		if dir < 0 {
+			m.runsTable.MoveUp(1)
+		} else {
+			m.runsTable.MoveDown(1)
+		}
+		if newID, path := m.selectedRun(); newID != "" {
+			return m, reloadLogCmd(newID, path)
+		}
+	case focusLog:
+		if dir < 0 {
+			m.logVP.LineUp(1)
+		} else {
+			m.logVP.LineDown(1)
+		}
+	}
+	return m, nil
+}
+
+// rowAtY maps a terminal row to a table body-row index: one border-top +
+// one title line + one table header = 3 rows of chrome above the first
+// data row in every pane. Doesn't compensate for a table scrolled past the
+// first screenful (bubbles/table exposes no scroll-offset getter) — a
+// non-issue in practice at this tool's job/run-history scale.
+func rowAtY(y int) (int, bool) {
+	const chrome = 3
+	row := y - chrome
+	if row < 0 {
+		return 0, false
+	}
+	return row, true
 }
 
 func (m model) toggleEnabled() (tea.Model, tea.Cmd) {

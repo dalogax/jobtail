@@ -161,6 +161,81 @@ func TestTUINavigatesJobsToRunsToLog(t *testing.T) {
 	}
 }
 
+// addSecondJob gives seedStore's single "greet" job company, alphabetically
+// first, so mouse tests have >1 row to click between.
+func addSecondJob(t *testing.T, st *store.Store) {
+	t.Helper()
+	if err := st.CreateJob(context.Background(), store.Job{
+		ID: "abbey", Kind: "cli", Cron: "0 0 * * *", Timezone: "local",
+		Enabled: true, Cwd: t.TempDir(), Command: "true", MaxConcurrent: 1, Keep: 200,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMouseClickSelectsRowAndSwitchesPane(t *testing.T) {
+	st, logsDir := seedStore(t)
+	addSecondJob(t, st)
+	m := newModel(st, logsDir)
+	m = send(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = resolve(t, m, m.Init())
+
+	if got := m.selectedJobID(); got != "abbey" {
+		t.Fatalf("expected 'abbey' (alphabetically first) selected by default, got %q", got)
+	}
+
+	// Row chrome is 3 lines (border + title + header); Y=4 is the second
+	// data row, which is "greet" once jobs are sorted alphabetically.
+	m = send(t, m, tea.MouseMsg{X: 5, Y: 4, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	if got := m.selectedJobID(); got != "greet" {
+		t.Fatalf("click should have selected 'greet' (2nd row), got %q", got)
+	}
+	if m.focus != focusJobs {
+		t.Fatalf("clicking in the jobs pane's x-range should focus it, got %v", m.focus)
+	}
+
+	third := m.width / 3
+	m = send(t, m, tea.MouseMsg{X: third + 5, Y: 4, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	if m.focus != focusRuns {
+		t.Fatalf("clicking in the runs pane's x-range should focus it, got %v", m.focus)
+	}
+
+	m = send(t, m, tea.MouseMsg{X: 2*third + 5, Y: 4, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	if m.focus != focusLog {
+		t.Fatalf("clicking in the log pane's x-range should focus it, got %v", m.focus)
+	}
+}
+
+func TestMouseClickOutOfRangeIsIgnoredNotACrash(t *testing.T) {
+	st, logsDir := seedStore(t)
+	m := newModel(st, logsDir)
+	m = send(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = resolve(t, m, m.Init())
+
+	before := m.selectedJobID()
+	// Far below any real row (only 1 seeded job).
+	m = send(t, m, tea.MouseMsg{X: 5, Y: 30, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	if got := m.selectedJobID(); got != before {
+		t.Fatalf("an out-of-range click should not change the selection, got %q want %q", got, before)
+	}
+}
+
+func TestMouseWheelMovesJobSelection(t *testing.T) {
+	st, logsDir := seedStore(t)
+	addSecondJob(t, st)
+	m := newModel(st, logsDir)
+	m = send(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = resolve(t, m, m.Init())
+
+	if got := m.selectedJobID(); got != "abbey" {
+		t.Fatalf("expected 'abbey' selected by default, got %q", got)
+	}
+	m = send(t, m, tea.MouseMsg{X: 5, Y: 10, Button: tea.MouseButtonWheelDown})
+	if got := m.selectedJobID(); got != "greet" {
+		t.Fatalf("wheel-down should move selection to 'greet', got %q", got)
+	}
+}
+
 func TestTUIRunNowExecutesThroughRunner(t *testing.T) {
 	st, logsDir := seedStore(t)
 	m := newModel(st, logsDir)
