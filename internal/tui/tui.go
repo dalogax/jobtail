@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -35,15 +37,22 @@ const (
 // resolved tick — see internal/tui/tui_test.go's init().
 var refreshInterval = time.Second
 
+// Per-pane accent colors (btop-style: each panel gets its own hue rather
+// than one generic "focused" blue) — picked to echo btop's own cpu/mem/net
+// panel colors (violet/green/blue) since that's the specific look this was
+// modeled on.
 var (
-	borderStyle        = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).Padding(0, 1)
-	focusedBorderStyle = borderStyle.BorderForeground(lipgloss.Color("62"))
-	titleStyle         = lipgloss.NewStyle().Bold(true)
-	helpStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	statusOK           = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	statusFailed       = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	statusRunning      = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	statusNever        = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	accentJobs    = lipgloss.Color("39")  // blue
+	accentRuns    = lipgloss.Color("135") // violet
+	accentLog     = lipgloss.Color("42")  // green
+	dimPaneColor  = lipgloss.Color("240") // unfocused border/title — same muted gray as before
+	roundedPane   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
+	helpStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	helpKeyStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true)
+	statusOK      = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	statusFailed  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	statusRunning = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	statusNever   = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 )
 
 type model struct {
@@ -316,9 +325,10 @@ func (m *model) layout() {
 	}
 	m.topBoxHeight = topBoxOuter
 
-	// Each box's own border(2)+title(1) = 3 lines of chrome above the
-	// table/viewport content proper.
-	const titleAndBorderChrome = 3
+	// Each box's own border(2) = 2 lines of chrome above the table/
+	// viewport content proper — the title no longer costs its own content
+	// row, since it's embedded in the top border line itself (renderPane).
+	const titleAndBorderChrome = 2
 	tableHeight := topBoxOuter - titleAndBorderChrome
 	if tableHeight < 3 {
 		tableHeight = 3
@@ -717,24 +727,105 @@ func (m model) View() string {
 		return "loading..."
 	}
 
-	jobsBox := paneStyle(m.focus == focusJobs).Render(
-		titleStyle.Render("Jobs") + "\n" + m.jobsTable.View())
-	runsBox := paneStyle(m.focus == focusRuns).Render(
-		titleStyle.Render("Runs: "+m.selectedJobID()) + "\n" + m.runsTable.View())
-	logBox := paneStyle(m.focus == focusLog).Render(
-		titleStyle.Render("Log") + "\n" + m.logVP.View())
+	jobsBox := renderPane("Jobs", accentJobs, m.focus == focusJobs, m.jobsTable.View())
+	runsBox := renderPane("Runs: "+m.selectedJobID(), accentRuns, m.focus == focusRuns, m.runsTable.View())
+	logBox := renderPane("Log", accentLog, m.focus == focusLog, m.logVP.View())
 
 	top := lipgloss.JoinHorizontal(lipgloss.Top, jobsBox, runsBox)
 	body := lipgloss.JoinVertical(lipgloss.Left, top, logBox)
-	help := helpStyle.Render("h/l or arrows/enter/esc: move · e: enable/disable · r: run now · q: quit  " + m.statusMsg)
+	help := renderHelpBar(m.statusMsg)
 	return body + "\n" + help
 }
 
-func paneStyle(focused bool) lipgloss.Style {
+// renderPane draws one pane's box with a rounded, per-pane-accented border
+// (dimmed when unfocused, full accent + bold title when focused — btop
+// itself has no focus concept, so this is jobtail's own adaptation to keep
+// the existing focus affordance while adopting btop's per-panel color
+// identity) and its title embedded in the top border rule rather than as
+// a separate content row (see embedTitle).
+func renderPane(title string, accent lipgloss.Color, focused bool, content string) string {
+	borderColor := dimPaneColor
 	if focused {
-		return focusedBorderStyle
+		borderColor = accent
 	}
-	return borderStyle
+	box := roundedPane.BorderForeground(borderColor).Render(content)
+
+	labelStyle := lipgloss.NewStyle().Foreground(borderColor)
+	if focused {
+		labelStyle = labelStyle.Bold(true)
+	}
+	return embedTitle(box, title, labelStyle)
+}
+
+// borderLineRE matches a top border line lipgloss rendered with a single
+// BorderForeground color: one opening SGR sequence, the border rune run,
+// one closing reset. Verified directly against lipgloss v1.1.0's actual
+// output (never per-character escapes) before relying on this — see the
+// embedTitle comment.
+var borderLineRE = regexp.MustCompile(`^(\x1b\[[0-9;]*m)(.*)(\x1b\[0m)$`)
+
+// embedTitle splices a title into a rendered box's already-drawn top
+// border line — btop's signature look, a title inline in the border rule
+// itself rather than a separate content row above it — since lipgloss has
+// no built-in support for this.
+//
+// This is safe specifically *because* BorderForeground wraps the whole
+// border line in one escape/reset pair, never per-rune (confirmed via a
+// real pty capture of lipgloss's actual bytes, not assumed): the runes
+// between that opening escape and the closing reset are plain border
+// characters with no embedded codes, so slicing them by rune index can't
+// corrupt anything. The label's own style ends with its own reset, which
+// clears ALL active SGR state, not just its own — so the opening border
+// color has to be re-emitted after the label, not assumed to still be
+// active, or the rest of the border would render in the default color.
+//
+// If jobtail ever runs with color disabled, the border line carries no
+// escape codes at all and borderLineRE simply won't match; the whole line
+// is then treated as plain body text, so the title still gets spliced in,
+// just uncolored.
+func embedTitle(box, title string, labelStyle lipgloss.Style) string {
+	lines := strings.SplitN(box, "\n", 2)
+	top := lines[0]
+
+	prefix, body, suffix := "", top, ""
+	if m := borderLineRE.FindStringSubmatch(top); m != nil {
+		prefix, body, suffix = m[1], m[2], m[3]
+	}
+
+	runes := []rune(body)
+	label := " " + title + " "
+	labelRunes := []rune(label)
+	const start = 1
+	end := start + len(labelRunes)
+	if start >= len(runes) || end >= len(runes) {
+		return box // too narrow for a title: leave the plain border as-is
+	}
+
+	newTop := prefix + string(runes[:start]) + labelStyle.Render(label) + prefix + string(runes[end:]) + suffix
+	if len(lines) == 1 {
+		return newTop
+	}
+	return newTop + "\n" + lines[1]
+}
+
+// renderHelpBar is the bottom key-hint bar, styled like btop's own footer:
+// each key highlighted, its description dimmed.
+func renderHelpBar(statusMsg string) string {
+	key := func(k, desc string) string {
+		return helpKeyStyle.Render(k) + helpStyle.Render(" "+desc)
+	}
+	bar := strings.Join([]string{
+		key("h/l/arrows", "move"),
+		key("enter", "open"),
+		key("esc", "back"),
+		key("e", "enable/disable"),
+		key("r", "run now"),
+		key("q", "quit"),
+	}, helpStyle.Render("  ·  "))
+	if statusMsg != "" {
+		bar += helpStyle.Render("   ") + statusMsg
+	}
+	return bar
 }
 
 // renderLog renders a run's captured output for the log pane: agent

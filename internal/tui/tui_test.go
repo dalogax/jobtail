@@ -286,10 +286,14 @@ func TestMouseBoundariesMatchActualRenderedBorders(t *testing.T) {
 	if len(lines) < 2 {
 		t.Fatalf("view has too few lines: %d", len(lines))
 	}
-	titleRow := []rune(ansiRE.ReplaceAllString(lines[1], "")) // "Jobs ... Runs: ..." (log is a separate row now)
+	// Titles are embedded in each box's own top border line (row 0), not a
+	// separate content row, so row 1 (an interior content row) still shows
+	// the same left/mid/right vertical border characters a title row used
+	// to — pane borders run down every row of the box, title or not.
+	contentRow := []rune(ansiRE.ReplaceAllString(lines[1], ""))
 
 	borderCols := []int{}
-	for i, r := range titleRow {
+	for i, r := range contentRow {
 		if r == '│' {
 			borderCols = append(borderCols, i)
 		}
@@ -299,25 +303,25 @@ func TestMouseBoundariesMatchActualRenderedBorders(t *testing.T) {
 	// border, and runs' own right edge.
 	if len(borderCols) != 4 {
 		t.Fatalf("expected 4 vertical border characters on the top row (left edge + adjacent pair + right edge), found %d: %q",
-			len(borderCols), string(titleRow))
+			len(borderCols), string(contentRow))
 	}
 	if d := abs(borderCols[1] - m.jobsBoxWidth); d > 1 {
 		t.Fatalf("jobs|runs border rendered at column %d, but jobsBoxWidth=%d (mouse clicks there would hit the wrong pane)",
 			borderCols[1], m.jobsBoxWidth)
 	}
 
-	// Row topBoxHeight is the log box's own top border; topBoxHeight+1 is
-	// its title line (same one-row offset the top boxes have at line 1).
-	if m.topBoxHeight+1 >= len(lines) {
+	// Row topBoxHeight is the log box's own top border, with its title
+	// embedded directly in that same rule (renderPane/embedTitle) — no
+	// separate title row beneath it anymore.
+	if m.topBoxHeight >= len(lines) {
 		t.Fatalf("topBoxHeight=%d is past the end of the rendered view (%d lines)", m.topBoxHeight, len(lines))
 	}
 	logBorderRow := ansiRE.ReplaceAllString(lines[m.topBoxHeight], "")
-	if !strings.ContainsAny(logBorderRow, "┌┬┐─") {
-		t.Fatalf("expected the log pane's top border at row topBoxHeight=%d, got: %q", m.topBoxHeight, logBorderRow)
+	if !strings.ContainsAny(logBorderRow, "╭╮╰╯─") {
+		t.Fatalf("expected the log pane's rounded top border at row topBoxHeight=%d, got: %q", m.topBoxHeight, logBorderRow)
 	}
-	logTitleRow := ansiRE.ReplaceAllString(lines[m.topBoxHeight+1], "")
-	if !strings.Contains(logTitleRow, "Log") {
-		t.Fatalf("expected the log pane's title at row topBoxHeight+1=%d, got: %q", m.topBoxHeight+1, logTitleRow)
+	if !strings.Contains(logBorderRow, "Log") {
+		t.Fatalf("expected the log pane's title embedded in its top border at row topBoxHeight=%d, got: %q", m.topBoxHeight, logBorderRow)
 	}
 }
 
