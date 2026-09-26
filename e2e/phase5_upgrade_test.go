@@ -75,6 +75,37 @@ func TestVersionFlagReportsCurrentVersion(t *testing.T) {
 	}
 }
 
+// TestBareInvocationOpensDashboardNotHelp confirms `jobtail` with no
+// subcommand attempts to open the dashboard rather than printing help.
+// There's no real tty in this test environment, so it can't render the
+// TUI end to end here (that's verified separately, via a real pty) — but
+// the distinct failure mode (openDashboard's "tui: could not open a new
+// TTY", not cobra's usage/help text) proves which code path actually ran.
+func TestBareInvocationOpensDashboardNotHelp(t *testing.T) {
+	e := newEnv(t)
+	out, err := e.runAllowFail()
+	if err == nil {
+		t.Fatalf("expected an error opening a tty-less dashboard, got success: %s", out)
+	}
+	if strings.Contains(out, "Available Commands") {
+		t.Fatalf("bare invocation printed help instead of opening the dashboard: %s", out)
+	}
+	if !strings.Contains(out, "tui:") {
+		t.Fatalf("expected a dashboard-open attempt in the error, got: %s", out)
+	}
+}
+
+func TestUnknownSubcommandStillErrors(t *testing.T) {
+	e := newEnv(t)
+	out, err := e.runAllowFail("bogus")
+	if err == nil {
+		t.Fatalf("expected an error for an unknown subcommand, got success: %s", out)
+	}
+	if !strings.Contains(out, "unknown command") {
+		t.Fatalf("expected a clear 'unknown command' error, got: %s", out)
+	}
+}
+
 func TestBackgroundSuggestionAppearsOnStderrWhenNewer(t *testing.T) {
 	e := newEnv(t)
 	apiBase, hits := fakeRelease(t, "v2.0.0", "unused")

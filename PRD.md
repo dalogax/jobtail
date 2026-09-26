@@ -157,6 +157,7 @@ jobtail resume <run-id>            # agent runs only: opens an interactive Herdr
 jobtail tick                       # called by the systemd timer; not for interactive use
 jobtail gc                         # prune old runs/logs past retention
 jobtail tui                        # the Herdr plugin pane entrypoint
+                                    # (bare `jobtail`, no subcommand, does the same thing)
 ```
 
 All commands support `--json` for scripting, matching the convention Herdr itself uses.

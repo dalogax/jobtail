@@ -37,7 +37,7 @@ func currentVersion() string {
 // output a shell eval's directly (completion) — and `upgrade` already
 // reports version status itself.
 var noUpdateCheckCommands = map[string]bool{
-	"tick": true, "run-exec": true, "tui": true, "upgrade": true, "completion": true,
+	"tick": true, "run-exec": true, "tui": true, "jobtail": true, "upgrade": true, "completion": true,
 }
 
 // app bundles everything a subcommand needs: the open store and resolved
@@ -86,6 +86,13 @@ func main() {
 		Version:       currentVersion(),
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		Args:          cobra.NoArgs,
+		// Bare `jobtail`, no subcommand: open the dashboard directly
+		// rather than printing help — this is the common case for a
+		// tool meant to live in a Herdr tab.
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return openDashboard()
+		},
 	}
 	root.SetVersionTemplate("jobtail {{.Version}}\n")
 
