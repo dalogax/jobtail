@@ -5,6 +5,7 @@ package e2e
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -96,6 +97,33 @@ func (e *env) runAllowFail(args ...string) (string, error) {
 	cmd.Stderr = &buf
 	err := cmd.Run()
 	return buf.String(), err
+}
+
+// copyBinary copies the shared test binary to a fresh, disposable path.
+// `jobtail upgrade` replaces its own executable file in place, so any test
+// that exercises a real upgrade must run against a private copy — never
+// the shared binary() every other test in this package reuses.
+func (e *env) copyBinary(t *testing.T) string {
+	t.Helper()
+	src, err := os.Open(e.bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+
+	dstPath := filepath.Join(t.TempDir(), "jobtail")
+	dst, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		dst.Close()
+		t.Fatal(err)
+	}
+	if err := dst.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return dstPath
 }
 
 // start is like runAllowFail but doesn't wait — for tests that need to race

@@ -4,14 +4,41 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
 
+	"github.com/jarvis0064/jobtail/internal/selfupdate"
 	"github.com/jarvis0064/jobtail/internal/store"
 )
+
+// version is set at release-build time via -ldflags "-X main.version=vX.Y.Z"
+// (see .github/workflows/release.yml). A plain `go build` leaves it "dev",
+// which selfupdate.CheckForUpdate and `jobtail upgrade` both treat as
+// "nothing to compare against, always safe to install latest."
+var version = "dev"
+
+// currentVersion lets the e2e suite simulate "this build is vX.Y.Z" without
+// needing a real ldflags build per test case.
+func currentVersion() string {
+	if v := os.Getenv("JOBTAIL_VERSION_OVERRIDE"); v != "" {
+		return v
+	}
+	return version
+}
+
+// noUpdateCheckCommands are commands that must never print an update
+// suggestion — it's always written to stderr (so it can never corrupt a
+// command's --json stdout), but it would still be noise in a systemd
+// journal (tick, run-exec), disrupt the TUI's alt-screen (tui), or step on
+// output a shell eval's directly (completion) — and `upgrade` already
+// reports version status itself.
+var noUpdateCheckCommands = map[string]bool{
+	"tick": true, "run-exec": true, "tui": true, "upgrade": true, "completion": true,
+}
 
 // app bundles everything a subcommand needs: the open store and resolved
 // data-dir paths (PRD §12 decision 4: no config file, just JOBTAIL_DATA_DIR).
@@ -56,9 +83,11 @@ func main() {
 	root := &cobra.Command{
 		Use:           "jobtail",
 		Short:         "Schedule and watch recurring cli/agent jobs for Herdr",
+		Version:       currentVersion(),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
+	root.SetVersionTemplate("jobtail {{.Version}}\n")
 
 	root.AddCommand(
 		newAddCmd(),
@@ -77,10 +106,27 @@ func main() {
 		newGCCmd(),
 		newTUICmd(),
 		newInstallSystemdCmd(),
+		newUpgradeCmd(),
 	)
 
-	if err := root.Execute(); err != nil {
+	ran, err := root.ExecuteC()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "jobtail:", err)
+		maybeSuggestUpdate(ran)
 		os.Exit(1)
+	}
+	maybeSuggestUpdate(ran)
+}
+
+func maybeSuggestUpdate(ran *cobra.Command) {
+	if ran == nil || noUpdateCheckCommands[ran.Name()] {
+		return
+	}
+	dd := dataDir()
+	if err := os.MkdirAll(dd, 0o700); err != nil {
+		return
+	}
+	if msg := selfupdate.CheckForUpdate(context.Background(), dd, currentVersion()); msg != "" {
+		fmt.Fprintln(os.Stderr, "jobtail:", msg)
 	}
 }
