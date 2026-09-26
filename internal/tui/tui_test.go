@@ -109,6 +109,56 @@ func runCmd(cmd tea.Cmd) []tea.Msg {
 func key(r rune) tea.KeyMsg            { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}} }
 func special(t tea.KeyType) tea.KeyMsg { return tea.KeyMsg{Type: t} }
 
+// TestLongLogLineIsWrappedNotCropped is the regression test for a real bug
+// found by actually reading a long agent transcript in the TUI: a single
+// long paragraph (no internal newlines — a common shape for prose a model
+// writes) was silently missing its back half, at every scroll position.
+// bubbles/viewport only splits on literal '\n' and horizontally *crops*
+// (ansi.Cut) anything wider than its own width rather than wrapping it —
+// scrolling can't recover content lost within one logical line. Fixed by
+// word-wrapping to the viewport's width before SetContent.
+func TestLongLogLineIsWrappedNotCropped(t *testing.T) {
+	st, logsDir := seedStore(t)
+	ctx := context.Background()
+	if err := st.CreateJob(ctx, store.Job{
+		ID: "longlog", Kind: "agent", Cron: "0 0 * * *", Timezone: "local",
+		Enabled: true, Cwd: t.TempDir(), MaxConcurrent: 1, Keep: 200,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// One long unbroken line, deliberately much wider than any reasonable
+	// terminal, ending in a distinctive tail to search for.
+	longLine := strings.Repeat("word ", 60) + "FINDME-TAIL-MARKER"
+	runID := "long-run-1"
+	logPath := filepath.Join(logsDir, runID+".log")
+	transcript := `{"type":"assistant","message":{"content":[{"type":"text","text":"` + longLine + `"}]}}` + "\n"
+	if err := os.WriteFile(logPath, []byte(transcript), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run, err := st.StartRun(ctx, "longlog", runID, "manual", logPath, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FinishRun(ctx, run.ID, "ok", 0, time.Now(), 5); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newModel(st, logsDir)
+	m = send(t, m, tea.WindowSizeMsg{Width: 100, Height: 40}) // narrower than longLine
+	m = resolve(t, m, m.Init())
+	m.selectJobByID("longlog") // seedStore's "greet" sorts first alphabetically otherwise
+	m = resolve(t, m, reloadRunsCmd(m.ctx, m.st, "longlog"))
+	m = send(t, m, special(tea.KeyEnter)) // jobs -> runs
+	m = send(t, m, special(tea.KeyEnter)) // runs -> log
+
+	// The tail must be reachable by scrolling — proving the line actually
+	// wrapped into multiple viewport lines instead of being cropped once.
+	m.logVP.GotoBottom()
+	if !strings.Contains(m.logVP.View(), "FINDME-TAIL-MARKER") {
+		t.Fatalf("long line's tail was lost — cropped instead of wrapped:\n%s", m.logVP.View())
+	}
+}
+
 func TestTUINavigatesJobsToRunsToLog(t *testing.T) {
 	st, logsDir := seedStore(t)
 	m := newModel(st, logsDir)

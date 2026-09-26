@@ -239,7 +239,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		atBottom := m.logVP.AtBottom()
-		m.logVP.SetContent(renderLog(msg.text, m.selectedJobKind()))
+		m.logVP.SetContent(wrapForViewport(renderLog(msg.text, m.selectedJobKind()), m.logVP.Width))
 		if atBottom {
 			m.logVP.GotoBottom()
 		}
@@ -738,4 +738,19 @@ func renderLog(raw, jobKind string) string {
 		return raw
 	}
 	return renderTranscript(raw)
+}
+
+// wrapForViewport word-wraps text to width before handing it to
+// viewport.SetContent. bubbles/viewport only ever splits on literal '\n'
+// and, for any line wider than its own width, horizontally *crops* the
+// rest with ansi.Cut rather than wrapping it — found by actually reading a
+// real, longer agent transcript in the TUI: a single long paragraph (no
+// internal newlines) was silently missing its back half, with no scroll
+// position that could recover it, since the loss happened within one
+// logical line rather than across lines.
+func wrapForViewport(content string, width int) string {
+	if width <= 0 {
+		return content
+	}
+	return lipgloss.NewStyle().Width(width).Render(content)
 }
