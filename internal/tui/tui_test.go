@@ -292,6 +292,33 @@ func TestMouseClickOutOfRangeIsIgnoredNotACrash(t *testing.T) {
 	}
 }
 
+// TestNarrowTerminalDoesNotOverflow is the regression test for a real
+// reported bug: on a narrow ("phone aspect ratio") terminal, the log pane
+// correctly shrank to match, but the jobs/runs row on top didn't — because
+// jobsColumns/runsColumns each had a hardcoded floor ("remaining < 20 ->
+// 20", "startedW < 12 -> 12") that kept their declared total width wider
+// than whatever the terminal actually had, regardless of how narrow it
+// got. Checked down to 40 columns, a realistic narrow-phone-terminal
+// width; below roughly 35 there's a genuine structural floor (5+4
+// distinctly-labeled columns each need at least 1 char plus their own
+// padding and box chrome), not a bug to chase — that's narrower than any
+// real terminal app is likely to run at.
+func TestNarrowTerminalDoesNotOverflow(t *testing.T) {
+	st, logsDir := seedStore(t)
+	for _, width := range []int{172, 90, 60, 45, 40} {
+		m := newModel(st, logsDir)
+		m = send(t, m, tea.WindowSizeMsg{Width: width, Height: 90})
+		m = resolve(t, m, m.Init())
+
+		if got := m.jobsBoxWidth + m.runsBoxWidth; got > width {
+			t.Fatalf("at terminal width %d: jobs+runs boxes total %d, wider than the terminal itself", width, got)
+		}
+		if m.logVP.Width+4 > width {
+			t.Fatalf("at terminal width %d: log box width %d, wider than the terminal itself", width, m.logVP.Width+4)
+		}
+	}
+}
+
 func TestMouseWheelMovesJobSelection(t *testing.T) {
 	st, logsDir := seedStore(t)
 	addSecondJob(t, st)

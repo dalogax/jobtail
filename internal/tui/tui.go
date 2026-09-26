@@ -268,26 +268,30 @@ func (m *model) layout() {
 		return
 	}
 	half := m.width / 2
-	paneWidth := half - 4
-	if paneWidth < 10 {
-		paneWidth = 10
-	}
 
 	// boxChrome: each pane's Border(NormalBorder) contributes 2 columns
 	// (left+right border) and its Padding(0,1) contributes 2 more
 	// (left+right padding) — 4 total, on top of the table's own content
-	// width. Getting this wrong is exactly what broke mouse hit-testing
-	// once already; layout and hit-testing both read jobsBoxWidth/
-	// runsBoxWidth/topBoxHeight from here rather than re-deriving them.
+	// width, which itself is *already* wider than the raw column widths
+	// by 2 chars per column (bubbles/table's own per-cell Padding(0,1)).
+	// jobsColumns/runsColumns are handed a target that backs *both* of
+	// those overheads out (different per table, since they have a
+	// different column count), so the box that comes out the other end
+	// of SetColumns -> columnsWidth -> SetWidth actually lands on `half`
+	// instead of quietly ending up wider — mixing these up is exactly
+	// what caused a real, measured overflow (jobs+runs summed to 190
+	// columns on a 172-wide terminal) despite each step looking right on
+	// its own.
 	const boxChrome = 4
+	const jobsCols, runsCols = 5, 4
 
-	jobCols := jobsColumns(paneWidth)
+	jobCols := jobsColumns(half - boxChrome - 2*jobsCols)
 	m.jobsTable.SetColumns(jobCols)
 	jobsContentWidth := columnsWidth(jobCols)
 	m.jobsTable.SetWidth(jobsContentWidth)
 	m.jobsBoxWidth = jobsContentWidth + boxChrome
 
-	runCols := runsColumns(paneWidth)
+	runCols := runsColumns(half - boxChrome - 2*runsCols)
 	m.runsTable.SetColumns(runCols)
 	runsContentWidth := columnsWidth(runCols)
 	m.runsTable.SetWidth(runsContentWidth)
@@ -349,36 +353,61 @@ func columnsWidth(cols []table.Column) int {
 // jobsColumns splits an available pane width across the jobs table's
 // columns: fixed budgets for Kind/Runs/Status, the rest split between ID
 // and Next.
-func jobsColumns(width int) []table.Column {
-	const kindW, runsW, statusW = 5, 4, 9
-	remaining := width - kindW - runsW - statusW
-	if remaining < 20 {
-		remaining = 20
+// proportionalWidths splits `width` across len(shares) columns by relative
+// weight, guaranteeing the columns always sum to exactly `width` (down to
+// 1 char each) — never more. A fixed-minimum floor per column here (an
+// earlier version had one: "remaining < 20 -> 20") is exactly what broke
+// narrow terminals: the declared column widths stayed wider than the
+// actual available pane once the terminal got narrow enough (a phone-sized
+// aspect ratio, e.g.), so the box didn't shrink with the terminal at all,
+// while the log pane (no such floor) shrank correctly — that mismatch is
+// what got reported and reproduced.
+func proportionalWidths(width int, shares ...int) []int {
+	if width < len(shares) {
+		width = len(shares) // 1 char minimum per column
 	}
-	idW := remaining * 6 / 10
-	nextW := remaining - idW
+	total := 0
+	for _, s := range shares {
+		total += s
+	}
+	cols := make([]int, len(shares))
+	sum := 0
+	for i, s := range shares {
+		cols[i] = width * s / total
+		if cols[i] < 1 {
+			cols[i] = 1
+		}
+		sum += cols[i]
+	}
+	// Give integer-division leftover (or claw back an over-allocation from
+	// the 1-char-minimum clamp above) to the first, widest column.
+	cols[0] += width - sum
+	if cols[0] < 1 {
+		cols[0] = 1
+	}
+	return cols
+}
+
+func jobsColumns(width int) []table.Column {
+	w := proportionalWidths(width, 6, 2, 1, 3, 2) // ID, Kind, Runs, Next, Status
 	return []table.Column{
-		{Title: "ID", Width: idW},
-		{Title: "Kind", Width: kindW},
-		{Title: "Runs", Width: runsW},
-		{Title: "Next", Width: nextW},
-		{Title: "Status", Width: statusW},
+		{Title: "ID", Width: w[0]},
+		{Title: "Kind", Width: w[1]},
+		{Title: "Runs", Width: w[2]},
+		{Title: "Next", Width: w[3]},
+		{Title: "Status", Width: w[4]},
 	}
 }
 
 // runsColumns splits an available pane width across the runs table's
-// columns: fixed budgets for Status/Trigger/Dur, the rest to Started.
+// columns proportionally (see proportionalWidths).
 func runsColumns(width int) []table.Column {
-	const statusW, triggerW, durW = 8, 9, 6
-	startedW := width - statusW - triggerW - durW
-	if startedW < 12 {
-		startedW = 12
-	}
+	w := proportionalWidths(width, 3, 3, 5, 2) // Status, Trigger, Started, Dur
 	return []table.Column{
-		{Title: "Status", Width: statusW},
-		{Title: "Trigger", Width: triggerW},
-		{Title: "Started", Width: startedW},
-		{Title: "Dur", Width: durW},
+		{Title: "Status", Width: w[0]},
+		{Title: "Trigger", Width: w[1]},
+		{Title: "Started", Width: w[2]},
+		{Title: "Dur", Width: w[3]},
 	}
 }
 
