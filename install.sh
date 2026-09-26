@@ -47,9 +47,37 @@ main() {
   echo "jobtail: installed to ${INSTALL_DIR}/jobtail" >&2
   case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;
-    *) echo "jobtail: ${INSTALL_DIR} is not on your PATH — add it to your shell profile" >&2 ;;
+    *) add_to_path ;;
   esac
   echo "jobtail: next, run: jobtail install-systemd --enable" >&2
+}
+
+# add_to_path appends INSTALL_DIR to the current shell's profile, once, so
+# a fresh shell resolves `jobtail` with no path needed — not just a printed
+# warning left for the user to act on themselves.
+add_to_path() {
+  marker="# added by the jobtail installer"
+  case "${SHELL:-}" in
+    */fish)
+      profile="$HOME/.config/fish/config.fish"
+      line="set -gx PATH $INSTALL_DIR \$PATH $marker"
+      ;;
+    */zsh)
+      profile="$HOME/.zshrc"
+      line="export PATH=\"$INSTALL_DIR:\$PATH\" $marker"
+      ;;
+    *)
+      profile="$HOME/.bashrc"
+      line="export PATH=\"$INSTALL_DIR:\$PATH\" $marker"
+      ;;
+  esac
+
+  if [ -f "$profile" ] && grep -qF "$marker" "$profile" 2>/dev/null; then
+    return
+  fi
+  mkdir -p "$(dirname "$profile")"
+  printf '\n%s\n' "$line" >> "$profile"
+  echo "jobtail: added ${INSTALL_DIR} to PATH in ${profile} (open a new shell, or run: export PATH=\"${INSTALL_DIR}:\$PATH\")" >&2
 }
 
 main

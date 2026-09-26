@@ -143,6 +143,31 @@ func TestAgentJobNoSessionIDStillOKButNotResumable(t *testing.T) {
 	}
 }
 
+// TestRealClaudeAcceptsOurAgentInvocation is the antidote to a bug that
+// slipped past every fake_claude.sh-backed test above: this suite never
+// once called the real claude binary, so it had no way to notice when
+// claude 2.1.x started refusing `-p --output-format=stream-json` without
+// --verbose (found only by actually running `jobtail run` against a real
+// agent job — see execengine.RunAgent's args). Skipped by default (real
+// API usage costs money); opt in with JOBTAIL_REAL_CLAUDE_TEST=1 before a
+// release, or whenever the exact claude invocation shape changes.
+func TestRealClaudeAcceptsOurAgentInvocation(t *testing.T) {
+	if os.Getenv("JOBTAIL_REAL_CLAUDE_TEST") == "" {
+		t.Skip("set JOBTAIL_REAL_CLAUDE_TEST=1 to run this against the real claude binary (costs real API usage)")
+	}
+	if _, err := exec.LookPath("claude"); err != nil {
+		t.Skip("claude not on PATH")
+	}
+	e := newEnv(t)
+	work := t.TempDir()
+	e.run("add", "real-check", "--kind", "agent", "--cron", "0 0 * * *", "--cwd", work,
+		"--prompt", "Reply with exactly the word OK and nothing else.", "--model", "sonnet")
+	out, err := e.runAllowFail("run", "real-check")
+	if err != nil {
+		t.Fatalf("real claude invocation was rejected: %v\n%s", err, out)
+	}
+}
+
 func TestResumeRejectsCLIJob(t *testing.T) {
 	e := newEnv(t)
 	work := t.TempDir()

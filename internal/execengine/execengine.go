@@ -80,6 +80,7 @@ func RunAgent(ctx context.Context, j store.Job, logPath string, onSessionID func
 	args := []string{
 		"-p", j.Prompt,
 		"--output-format", "stream-json",
+		"--verbose", // claude 2.1.x refuses -p --output-format=stream-json without it
 		"--add-dir", j.Cwd,
 		"--no-session-persistence",
 	}
