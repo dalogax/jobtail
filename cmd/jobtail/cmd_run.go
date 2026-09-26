@@ -14,6 +14,7 @@ import (
 
 	"github.com/jarvis0064/jobtail/internal/cronx"
 	"github.com/jarvis0064/jobtail/internal/execengine"
+	"github.com/jarvis0064/jobtail/internal/runner"
 	"github.com/jarvis0064/jobtail/internal/store"
 )
 
@@ -41,48 +42,6 @@ func extractPaneID(rawJSON []byte) (string, error) {
 		return resp.Result.Pane.PaneID, nil
 	}
 	return "", fmt.Errorf("herdr tab create output had no pane id: %s", rawJSON)
-}
-
-// executeRun dispatches by job kind and runs to completion in-process.
-func executeRun(ctx context.Context, a *app, j store.Job, runID string, logPath string) (execengine.Result, error) {
-	switch j.Kind {
-	case "cli":
-		return execengine.RunCLI(ctx, j, logPath)
-	case "agent":
-		return execengine.RunAgent(ctx, j, logPath, func(sessionID string) {
-			_ = a.st.SetRunSessionID(ctx, runID, sessionID)
-		})
-	default:
-		return execengine.Result{}, fmt.Errorf("unknown job kind %q", j.Kind)
-	}
-}
-
-// finishRun records the outcome and, on failure, tries a Herdr desktop
-// notification (best-effort: silently skipped if herdr isn't on PATH, e.g.
-// under test or outside a Herdr session).
-func finishRun(ctx context.Context, a *app, j store.Job, runID string, res execengine.Result, runErr error) error {
-	status := res.Status
-	if status == "" {
-		status = "failed"
-	}
-	if err := a.st.FinishRun(ctx, runID, status, res.ExitCode, time.Now()); err != nil {
-		return err
-	}
-	if status == "failed" || status == "timeout" {
-		notifyFailure(j.ID, status)
-	}
-	return runErr
-}
-
-func notifyFailure(jobID, status string) {
-	if os.Getenv("JOBTAIL_DISABLE_NOTIFY") != "" {
-		return // set by the e2e suite so intentionally-failing test jobs don't spam real Herdr toasts
-	}
-	if _, err := exec.LookPath("herdr"); err != nil {
-		return
-	}
-	_ = exec.Command("herdr", "notification", "show",
-		fmt.Sprintf("jobtail: %s %s", jobID, status), "--sound", "request").Run()
 }
 
 func newRunCmd() *cobra.Command {
@@ -114,8 +73,8 @@ func newRunCmd() *cobra.Command {
 				return err
 			}
 
-			res, runErr := executeRun(ctx, a, j, runID, logPath)
-			if err := finishRun(ctx, a, j, runID, res, runErr); err != nil {
+			res, runErr := runner.Execute(ctx, a.st, j, runID, logPath)
+			if err := runner.Finish(ctx, a.st, j, runID, res, runErr); err != nil {
 				fmt.Fprintln(cmd.OutOrStdout(), err)
 			}
 
@@ -279,8 +238,8 @@ func newRunExecCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, runErr := executeRun(ctx, a, j, r.ID, r.LogPath)
-			return finishRun(ctx, a, j, r.ID, res, runErr)
+			res, runErr := runner.Execute(ctx, a.st, j, r.ID, r.LogPath)
+			return runner.Finish(ctx, a.st, j, r.ID, res, runErr)
 		},
 	}
 }
