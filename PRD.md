@@ -93,7 +93,8 @@ CREATE TABLE jobs (
   command       TEXT,                       -- kind='cli': shell command
   prompt        TEXT,                       -- kind='agent': the task prompt
   model         TEXT,                       -- kind='agent': --model (optional)
-  permission_mode TEXT,                     -- kind='agent': --permission-mode (default 'acceptEdits')
+  provider      TEXT,                       -- kind='agent': 'claude' (default/NULL) | 'opencode' | 'codex'
+  permission_mode TEXT,                     -- kind='agent': meaning is provider-specific, see §14
   max_concurrent INTEGER NOT NULL DEFAULT 1,
   timeout_seconds INTEGER,                  -- optional hard kill
   created_at    TEXT NOT NULL,
@@ -108,7 +109,7 @@ CREATE TABLE runs (
   started_at    TEXT NOT NULL,
   finished_at   TEXT,
   exit_code     INTEGER,
-  session_id    TEXT,                       -- kind='agent' only: claude session id, for --resume
+  session_id    TEXT,                       -- kind='agent' only: session/thread id, for `resume` (§14)
   log_path      TEXT NOT NULL,
   duration_ms   INTEGER                     -- measured directly around the exec.Cmd run; see note below
 );
@@ -152,9 +153,9 @@ jobtail edit nightly-deps --cron "0 4 * * *"
 jobtail rm nightly-deps
 jobtail run nightly-deps           # manual trigger, trigger='manual', fresh session
 jobtail resume <run-id>            # agent runs only: opens an interactive Herdr tab
-                                   # attached to `claude --resume <session_id>`, seeded
-                                   # from that run's session_id — for picking up a
-                                   # failed/incomplete agent run by hand
+                                   # attached to that run's provider (claude --resume /
+                                   # opencode --session / codex resume), seeded from
+                                   # the run's captured session id — see §14
 
 # plumbing
 jobtail tick                       # called by the systemd timer; not for interactive use
@@ -290,3 +291,25 @@ Everything that was open is now decided. Listed so each can be challenged indivi
 - **Version**: `jobtail --version`. A plain `go build` (no ldflags) leaves it `"dev"` — treated everywhere as "nothing to compare against," never triggering an upgrade suggestion, and always safe to overwrite with `jobtail upgrade`.
 - **`jobtail upgrade`**: checks `GET /repos/dalogax/jobtail/releases/latest`, compares tags with `golang.org/x/mod/semver`, and — unless already current — downloads the asset for the running `GOOS`/`GOARCH` and atomically replaces its own executable (write to a temp file in the same directory, then `rename` over the original; safe on Linux even for the binary currently executing). `--check` reports without installing; `--force` reinstalls even if already latest.
 - **Background suggestion**: every command except `tick`, `run-exec`, `tui`, `upgrade`, and `completion` does a best-effort post-run check and prints `jobtail: a newer jobtail is available: vX -> vY (run \`jobtail upgrade\`)` to **stderr** (never stdout, so `--json` output stays parseable) if one is due. The check itself is cached on disk for 24h so it costs one HTTP request a day, not one per invocation, and a network failure or private/unreachable API is silently swallowed — this can never block or fail an ordinary command.
+
+## 14. Multi-provider agent jobs
+
+`--kind agent` jobs originally only meant "a headless `claude -p` turn." `--provider` (empty/omitted = `claude`, or `opencode`/`codex`) picks a different agent CLI for the same job shape (prompt, cwd, model) — one `execengine.RunAgent` dispatches to a `runClaudeAgent`/`runOpenCodeAgent`/`runCodexAgent` per provider, each with its own arg-building, JSON-stream parsing, and transcript renderer (`internal/tui/transcript.go`'s `renderTranscript`/`renderOpenCodeTranscript`/`renderCodexTranscript`).
+
+Every provider's invocation and JSON event shape below was checked directly against the real CLI on this box before being coded, not guessed from docs — with one caveat noted for codex.
+
+| Provider | Invocation | Session/thread id | Failure signal |
+|---|---|---|---|
+| `claude` | `claude -p <prompt> --output-format stream-json --verbose --add-dir <cwd> --no-session-persistence --permission-mode <acceptEdits\|...> [--model]` | `session_id` on the `type:"system",subtype:"init"` event | `is_error:true` on the `type:"result"` event, or no result event at all |
+| `opencode` | `opencode run <prompt> --format json [-m <model>]` | top-level camelCase `sessionID`, present on every event from the first line (no distinct init event) | a top-level `type:"error"` event — **process exit code is 0 even then**, confirmed directly by running an invalid-model request; exit-code alone is not trustworthy for this provider |
+| `codex` | `codex exec --json --sandbox <workspace-write\|read-only\|danger-full-access> --skip-git-repo-check [-m <model>] <prompt>` | `thread_id` on the `type:"thread.started"` event | `type:"turn.failed"` or top-level `type:"error"`; confirmed the process reliably exits non-zero on failure (unlike opencode) |
+
+`opencode` vs. "opencode 2": these are the same CLI/JSON protocol (`opencode run --format json`), not two things to support separately — opencode 2 is a newer major version with a reworked *server* API (relevant to programmatic HTTP/SDK use), but its headless `run` command and JSONL event shape are unchanged from v1 as of the version installed here (checked against `opencode run --help` and opencode's own GitHub issues referencing `--format json` on both the 1.18.x and `dev`/v2 branches). One `opencode` provider, shelling out to whatever `opencode` is on `PATH`, covers both — exactly like the `claude` provider already does for whatever Claude Code version is installed.
+
+**codex's success path is unverified on this box.** This box has no stored codex credentials (`codex login status` → "Not logged in"), so only codex's *error* path — a real 401 against `api.openai.com`, producing `thread.started`/`turn.started`/`error`/`turn.failed` — has been observed against the real binary. The `item.completed` shape used for a successful turn's assistant text is inferred from codex's documented event model. `TestRealCodexAcceptsOurAgentInvocation` in the e2e suite exists specifically so whoever next has working codex credentials can flip it on (`JOBTAIL_REAL_CODEX_TEST=1`) and get a real answer, the same opt-in-real-binary pattern already used for `TestRealClaudeAcceptsOurAgentInvocation`.
+
+`permission_mode` is reused rather than adding a second provider-specific column: for `claude` it's `acceptEdits`(default)/`bypassPermissions`/`plan`; for `codex` it *is* the `--sandbox` policy (default `workspace-write`, the closest codex equivalent of claude's default — never `danger-full-access` unless a job opts in, mirroring decision 6's "never bypassPermissions unless explicit"); `opencode` doesn't consume it at all (its own `--auto` flag was deliberately left unused — a real run with no such flag still executed a `bash` tool call with no permission prompt or hang, confirmed directly, so the unattended-hang risk that motivates claude's acceptEdits default doesn't appear to apply to opencode's `run` command).
+
+`resume`'s interactive command is provider-aware too (`cmd_run.go`'s `resumeCommand`), each verified against that binary's own `--help`: `claude --resume <id>`, `opencode --session <id>` (opens the interactive TUI on that session — its `run --session` counterpart is non-interactive), `codex resume <id>` (the top-level, interactive `resume` — distinct from the non-interactive `codex exec resume`).
+
+**A real, incidental bug found while verifying this**: on this mise-managed box, the resolved `claude`/`opencode`/`codex` binaries are mise shims that print `mise ~/.config/mise/config.toml tools: <tool>@<version>` to stderr before delegating — which was landing verbatim in captured logs and leaking into rendered transcripts (exactly the raw-noise §9 exists to prevent). Fixed by setting `MISE_QUIET=1` on every command execengine spawns (`childEnv()`), for all job kinds, not just agent jobs — scoped to jobtail's own child processes only, never the user's interactive shell or mise generally.

@@ -90,10 +90,31 @@ func newRunCmd() *cobra.Command {
 	}
 }
 
+// resumeCommand builds the interactive shell command that hands a
+// captured session/thread id back to the agent CLI that produced it, for
+// `resume` to run in a new Herdr tab. Each provider's interactive resume
+// syntax is verified against its real --help:
+//   - claude:   `claude --resume <session>`
+//   - opencode: `opencode --session <session>` (opens the interactive TUI
+//     on that session — its `run --session` counterpart is non-interactive)
+//   - codex:    `codex resume <session>` (the top-level, interactive
+//     `resume` command — distinct from `codex exec resume`, which is also
+//     non-interactive)
+func resumeCommand(provider, sessionID string) string {
+	switch execengine.EffectiveProvider(provider) {
+	case execengine.ProviderOpenCode:
+		return fmt.Sprintf("%s --session %s", execengine.OpenCodeBin(), sessionID)
+	case execengine.ProviderCodex:
+		return fmt.Sprintf("%s resume %s", execengine.CodexBin(), sessionID)
+	default:
+		return fmt.Sprintf("%s --resume %s", execengine.ClaudeBin(), sessionID)
+	}
+}
+
 func newResumeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "resume <run-id>",
-		Short: "Hand a failed agent run to an interactive Herdr tab via claude --resume",
+		Short: "Hand a failed agent run to an interactive session (in a new Herdr tab, if herdr is on PATH)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := openApp()
@@ -115,7 +136,7 @@ func newResumeCmd() *cobra.Command {
 				return fmt.Errorf("run %s belongs to job %q, which is kind=%s, not agent", r.ID, j.ID, j.Kind)
 			}
 			if !r.SessionID.Valid || r.SessionID.String == "" {
-				return fmt.Errorf("run %s has no captured session id (job may have failed before Claude Code started)", r.ID)
+				return fmt.Errorf("run %s has no captured session id (job may have failed before the agent CLI started)", r.ID)
 			}
 
 			if _, err := exec.LookPath("herdr"); err != nil {
@@ -129,8 +150,8 @@ func newResumeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			claudeCmd := fmt.Sprintf("%s --resume %s", execengine.ClaudeBin(), r.SessionID.String)
-			if err := exec.Command("herdr", "pane", "run", paneID, claudeCmd).Run(); err != nil {
+			resumeCmd := resumeCommand(j.Provider, r.SessionID.String)
+			if err := exec.Command("herdr", "pane", "run", paneID, resumeCmd).Run(); err != nil {
 				return fmt.Errorf("herdr pane run: %w", err)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "resumed run %s (session %s) in pane %s\n", r.ID, r.SessionID.String, paneID)

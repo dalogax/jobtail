@@ -68,8 +68,27 @@ func TestRenderTranscriptFallsBackOnUnparseableInput(t *testing.T) {
 
 func TestRenderLogPassesThroughCLIJobsVerbatim(t *testing.T) {
 	raw := "line one\nline two\n"
-	got := renderLog(raw, "cli")
+	got := renderLog(raw, "cli", "")
 	if got != raw {
 		t.Fatalf("cli logs should render verbatim, got:\n%s", got)
+	}
+}
+
+func TestRenderLogDispatchesToProviderTranscript(t *testing.T) {
+	claudeRaw := `{"type":"assistant","message":{"content":[{"type":"text","text":"hi from claude"}]}}` + "\n"
+	openCodeRaw := `{"type":"text","part":{"text":"hi from opencode"}}` + "\n"
+	codexRaw := `{"type":"item.completed","item":{"type":"agent_message","text":"hi from codex"}}` + "\n"
+
+	if got := renderLog(claudeRaw, "agent", ""); !strings.Contains(got, "hi from claude") {
+		t.Fatalf("default (empty) provider should render as claude, got:\n%s", got)
+	}
+	if got := renderLog(claudeRaw, "agent", "claude"); !strings.Contains(got, "hi from claude") {
+		t.Fatalf("explicit claude provider should render as claude, got:\n%s", got)
+	}
+	if got := renderLog(openCodeRaw, "agent", "opencode"); !strings.Contains(got, "hi from opencode") {
+		t.Fatalf("opencode provider should render via renderOpenCodeTranscript, got:\n%s", got)
+	}
+	if got := renderLog(codexRaw, "agent", "codex"); !strings.Contains(got, "hi from codex") {
+		t.Fatalf("codex provider should render via renderCodexTranscript, got:\n%s", got)
 	}
 }

@@ -12,8 +12,38 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dalogax/jobtail/internal/cronx"
+	"github.com/dalogax/jobtail/internal/execengine"
 	"github.com/dalogax/jobtail/internal/store"
 )
+
+// validProviders are the recognized values for --provider (kind=agent
+// only). "" is also valid and means execengine.ProviderClaude.
+var validProviders = map[string]bool{
+	"":                          true,
+	execengine.ProviderClaude:   true,
+	execengine.ProviderOpenCode: true,
+	execengine.ProviderCodex:    true,
+}
+
+// providerLabel shows the effective provider for a job whose Provider
+// field may be "" (meaning claude, execengine.effectiveProvider's default).
+func providerLabel(provider string) string {
+	if provider == "" {
+		return execengine.ProviderClaude + " (default)"
+	}
+	return provider
+}
+
+func validateProvider(kind, provider string) error {
+	if !validProviders[provider] {
+		return fmt.Errorf("--provider must be one of %q, %q, %q (or omitted for claude), got %q",
+			execengine.ProviderClaude, execengine.ProviderOpenCode, execengine.ProviderCodex, provider)
+	}
+	if kind != "agent" && provider != "" {
+		return fmt.Errorf("--provider only applies to --kind agent")
+	}
+	return nil
+}
 
 // runDuration is how long a run took, or "-" if it's still running (no
 // finished_at yet) — the plain-text `show`/`runs` output only ever showed
@@ -62,7 +92,7 @@ func resolveCwd(cwd string) (string, error) {
 }
 
 func newAddCmd() *cobra.Command {
-	var kind, cronExpr, cwd, command, prompt, model, permMode, timezone string
+	var kind, cronExpr, cwd, command, prompt, model, provider, permMode, timezone string
 	var maxConcurrent, keep int
 	var timeoutSeconds int64
 
@@ -92,6 +122,9 @@ func newAddCmd() *cobra.Command {
 			if kind == "agent" && prompt == "" {
 				return fmt.Errorf("--prompt is required for --kind agent")
 			}
+			if err := validateProvider(kind, provider); err != nil {
+				return err
+			}
 			if timezone == "" {
 				timezone = "local"
 			}
@@ -110,7 +143,7 @@ func newAddCmd() *cobra.Command {
 
 			j := store.Job{
 				ID: id, Kind: kind, Cron: cronExpr, Timezone: timezone, Enabled: true,
-				Cwd: cwd, Command: command, Prompt: prompt, Model: model, PermissionMode: permMode,
+				Cwd: cwd, Command: command, Prompt: prompt, Model: model, Provider: provider, PermissionMode: permMode,
 				MaxConcurrent: maxConcurrent, TimeoutSeconds: timeoutSeconds, Keep: keep,
 			}
 			if err := a.st.CreateJob(context.Background(), j); err != nil {
@@ -127,7 +160,9 @@ func newAddCmd() *cobra.Command {
 	cmd.Flags().StringVar(&command, "cmd", "", "shell command (kind=cli)")
 	cmd.Flags().StringVar(&prompt, "prompt", "", "agent task prompt (kind=agent)")
 	cmd.Flags().StringVar(&model, "model", "", "model alias, e.g. sonnet (kind=agent)")
-	cmd.Flags().StringVar(&permMode, "permission-mode", "", "permission mode (kind=agent, default acceptEdits)")
+	cmd.Flags().StringVar(&provider, "provider", "", `agent CLI: "claude" (default), "opencode", or "codex" (kind=agent)`)
+	cmd.Flags().StringVar(&permMode, "permission-mode", "", "permission mode: claude values are acceptEdits (default)/bypassPermissions/plan; "+
+		"codex values are a --sandbox policy, read-only/workspace-write (default)/danger-full-access; unused by opencode (kind=agent)")
 	cmd.Flags().StringVar(&timezone, "timezone", "local", `cron timezone: "local" or an IANA name`)
 	cmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 1, "max simultaneous runs of this job")
 	cmd.Flags().Int64Var(&timeoutSeconds, "timeout-seconds", 0, "hard kill after N seconds (0 = no timeout)")
@@ -216,6 +251,7 @@ func newShowCmd() *cobra.Command {
 				fmt.Fprintf(out, "cmd:             %s\n", j.Command)
 			} else {
 				fmt.Fprintf(out, "prompt:          %s\n", j.Prompt)
+				fmt.Fprintf(out, "provider:        %s\n", providerLabel(j.Provider))
 				fmt.Fprintf(out, "model:           %s\n", j.Model)
 				fmt.Fprintf(out, "permission-mode: %s\n", j.PermissionMode)
 			}
@@ -317,7 +353,7 @@ func newEnableCmd(enable bool) *cobra.Command {
 }
 
 func newEditCmd() *cobra.Command {
-	var cronExpr, cwd, command, prompt, model, permMode, timezone string
+	var cronExpr, cwd, command, prompt, model, provider, permMode, timezone string
 	var maxConcurrent, keep int
 	var timeoutSeconds int64
 	cmd := &cobra.Command{
@@ -343,6 +379,16 @@ func newEditCmd() *cobra.Command {
 			}
 			defer a.st.Close()
 
+			if cmd.Flags().Changed("provider") {
+				existing, err := a.st.GetJob(context.Background(), args[0])
+				if err != nil {
+					return err
+				}
+				if err := validateProvider(existing.Kind, provider); err != nil {
+					return err
+				}
+			}
+
 			p := store.JobPatch{}
 			setStr(&p.Cron, cmd, "cron", cronExpr)
 			setStr(&p.Timezone, cmd, "timezone", timezone)
@@ -350,6 +396,7 @@ func newEditCmd() *cobra.Command {
 			setStr(&p.Command, cmd, "cmd", command)
 			setStr(&p.Prompt, cmd, "prompt", prompt)
 			setStr(&p.Model, cmd, "model", model)
+			setStr(&p.Provider, cmd, "provider", provider)
 			setStr(&p.PermissionMode, cmd, "permission-mode", permMode)
 			if cmd.Flags().Changed("max-concurrent") {
 				p.MaxConcurrent = &maxConcurrent
@@ -368,7 +415,8 @@ func newEditCmd() *cobra.Command {
 	cmd.Flags().StringVar(&command, "cmd", "", "shell command (kind=cli)")
 	cmd.Flags().StringVar(&prompt, "prompt", "", "agent task prompt (kind=agent)")
 	cmd.Flags().StringVar(&model, "model", "", "model alias (kind=agent)")
-	cmd.Flags().StringVar(&permMode, "permission-mode", "", "permission mode (kind=agent)")
+	cmd.Flags().StringVar(&provider, "provider", "", `agent CLI: "claude", "opencode", or "codex" (kind=agent)`)
+	cmd.Flags().StringVar(&permMode, "permission-mode", "", "permission mode (kind=agent; meaning is provider-specific, see `add --help`)")
 	cmd.Flags().StringVar(&timezone, "timezone", "", `cron timezone`)
 	cmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 0, "max simultaneous runs")
 	cmd.Flags().Int64Var(&timeoutSeconds, "timeout-seconds", 0, "hard kill after N seconds")

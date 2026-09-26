@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   command         TEXT,
   prompt          TEXT,
   model           TEXT,
+  provider        TEXT,
   permission_mode TEXT,
   max_concurrent  INTEGER NOT NULL DEFAULT 1,
   timeout_seconds INTEGER,
@@ -58,11 +59,25 @@ CREATE INDEX IF NOT EXISTS idx_runs_job ON runs(job_id, started_at DESC);
 // actual execution instead, so it never conflates scheduling delay with
 // real run time.
 func additiveMigrations(db *sql.DB) error {
-	rows, err := db.Query(`PRAGMA table_info(runs)`)
+	if err := addColumnIfMissing(db, "runs", "duration_ms", "INTEGER"); err != nil {
+		return err
+	}
+	// provider distinguishes which agent CLI an agent-kind job runs under
+	// ("claude" | "opencode" | "codex"); empty/NULL means "claude", the
+	// original and still-default behavior, so existing jobs from before
+	// multi-provider support need no backfill.
+	if err := addColumnIfMissing(db, "jobs", "provider", "TEXT"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func addColumnIfMissing(db *sql.DB, table, column, sqlType string) error {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
 		return err
 	}
-	hasDurationMs := false
+	has := false
 	for rows.Next() {
 		var cid int
 		var name, ctype string
@@ -72,8 +87,8 @@ func additiveMigrations(db *sql.DB) error {
 			rows.Close()
 			return err
 		}
-		if name == "duration_ms" {
-			hasDurationMs = true
+		if name == column {
+			has = true
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -81,8 +96,8 @@ func additiveMigrations(db *sql.DB) error {
 	}
 	rows.Close()
 
-	if !hasDurationMs {
-		if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN duration_ms INTEGER`); err != nil {
+	if !has {
+		if _, err := db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + sqlType); err != nil {
 			return err
 		}
 	}
@@ -90,15 +105,19 @@ func additiveMigrations(db *sql.DB) error {
 }
 
 type Job struct {
-	ID             string
-	Kind           string // "cli" | "agent"
-	Cron           string
-	Timezone       string // "local" or an IANA name
-	Enabled        bool
-	Cwd            string
-	Command        string
-	Prompt         string
-	Model          string
+	ID       string
+	Kind     string // "cli" | "agent"
+	Cron     string
+	Timezone string // "local" or an IANA name
+	Enabled  bool
+	Cwd      string
+	Command  string
+	Prompt   string
+	Model    string
+	// Provider selects which agent CLI a kind="agent" job runs under:
+	// "" (default, meaning "claude"), "opencode", or "codex". Unused for
+	// kind="cli" jobs.
+	Provider       string
 	PermissionMode string
 	MaxConcurrent  int
 	TimeoutSeconds int64 // 0 = no timeout
@@ -172,18 +191,19 @@ func (s *Store) CreateJob(ctx context.Context, j Job) error {
 	}
 	now := timeToStr(time.Now())
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO jobs (id, kind, cron, timezone, enabled, cwd, command, prompt, model,
+		INSERT INTO jobs (id, kind, cron, timezone, enabled, cwd, command, prompt, model, provider,
 			permission_mode, max_concurrent, timeout_seconds, keep, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		j.ID, j.Kind, j.Cron, j.Timezone, boolToInt(j.Enabled), j.Cwd,
-		nullableStr(j.Command), nullableStr(j.Prompt), nullableStr(j.Model), nullableStr(j.PermissionMode),
+		nullableStr(j.Command), nullableStr(j.Prompt), nullableStr(j.Model), nullableStr(j.Provider),
+		nullableStr(j.PermissionMode),
 		j.MaxConcurrent, nullableInt(j.TimeoutSeconds), j.Keep, now, now)
 	return err
 }
 
 func (s *Store) GetJob(ctx context.Context, id string) (Job, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, kind, cron, timezone, enabled, cwd, command, prompt, model,
+		SELECT id, kind, cron, timezone, enabled, cwd, command, prompt, model, provider,
 		       permission_mode, max_concurrent, timeout_seconds, keep, created_at, updated_at
 		FROM jobs WHERE id = ?`, id)
 	return scanJob(row)
@@ -192,10 +212,10 @@ func (s *Store) GetJob(ctx context.Context, id string) (Job, error) {
 func scanJob(row *sql.Row) (Job, error) {
 	var j Job
 	var enabled int
-	var command, prompt, model, permMode sql.NullString
+	var command, prompt, model, provider, permMode sql.NullString
 	var timeoutSeconds sql.NullInt64
 	var createdAt, updatedAt string
-	err := row.Scan(&j.ID, &j.Kind, &j.Cron, &j.Timezone, &enabled, &j.Cwd, &command, &prompt, &model,
+	err := row.Scan(&j.ID, &j.Kind, &j.Cron, &j.Timezone, &enabled, &j.Cwd, &command, &prompt, &model, &provider,
 		&permMode, &j.MaxConcurrent, &timeoutSeconds, &j.Keep, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Job{}, ErrNotFound
@@ -207,6 +227,7 @@ func scanJob(row *sql.Row) (Job, error) {
 	j.Command = command.String
 	j.Prompt = prompt.String
 	j.Model = model.String
+	j.Provider = provider.String
 	j.PermissionMode = permMode.String
 	j.TimeoutSeconds = timeoutSeconds.Int64
 	j.CreatedAt, err = strToTime(createdAt)
@@ -222,7 +243,7 @@ func scanJob(row *sql.Row) (Job, error) {
 
 func (s *Store) ListJobs(ctx context.Context) ([]JobSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT j.id, j.kind, j.cron, j.timezone, j.enabled, j.cwd, j.command, j.prompt, j.model,
+		SELECT j.id, j.kind, j.cron, j.timezone, j.enabled, j.cwd, j.command, j.prompt, j.model, j.provider,
 		       j.permission_mode, j.max_concurrent, j.timeout_seconds, j.keep, j.created_at, j.updated_at,
 		       (SELECT COUNT(*) FROM runs r WHERE r.job_id = j.id) AS run_count,
 		       (SELECT r2.status FROM runs r2 WHERE r2.job_id = j.id ORDER BY r2.started_at DESC LIMIT 1) AS last_status,
@@ -237,10 +258,10 @@ func (s *Store) ListJobs(ctx context.Context) ([]JobSummary, error) {
 	for rows.Next() {
 		var js JobSummary
 		var enabled int
-		var command, prompt, model, permMode, lastStatus, lastRunAt sql.NullString
+		var command, prompt, model, provider, permMode, lastStatus, lastRunAt sql.NullString
 		var timeoutSeconds sql.NullInt64
 		var createdAt, updatedAt string
-		if err := rows.Scan(&js.ID, &js.Kind, &js.Cron, &js.Timezone, &enabled, &js.Cwd, &command, &prompt, &model,
+		if err := rows.Scan(&js.ID, &js.Kind, &js.Cron, &js.Timezone, &enabled, &js.Cwd, &command, &prompt, &model, &provider,
 			&permMode, &js.MaxConcurrent, &timeoutSeconds, &js.Keep, &createdAt, &updatedAt,
 			&js.RunCount, &lastStatus, &lastRunAt); err != nil {
 			return nil, err
@@ -249,6 +270,7 @@ func (s *Store) ListJobs(ctx context.Context) ([]JobSummary, error) {
 		js.Command = command.String
 		js.Prompt = prompt.String
 		js.Model = model.String
+		js.Provider = provider.String
 		js.PermissionMode = permMode.String
 		js.TimeoutSeconds = timeoutSeconds.Int64
 		js.LastStatus = lastStatus.String
@@ -322,6 +344,7 @@ type JobPatch struct {
 	Command        *string
 	Prompt         *string
 	Model          *string
+	Provider       *string
 	PermissionMode *string
 	MaxConcurrent  *int
 	TimeoutSeconds *int64
@@ -351,6 +374,9 @@ func (s *Store) EditJob(ctx context.Context, id string, p JobPatch) error {
 	if p.Model != nil {
 		j.Model = *p.Model
 	}
+	if p.Provider != nil {
+		j.Provider = *p.Provider
+	}
 	if p.PermissionMode != nil {
 		j.PermissionMode = *p.PermissionMode
 	}
@@ -364,11 +390,11 @@ func (s *Store) EditJob(ctx context.Context, id string, p JobPatch) error {
 		j.Keep = *p.Keep
 	}
 	_, err = s.db.ExecContext(ctx, `
-		UPDATE jobs SET cron=?, timezone=?, cwd=?, command=?, prompt=?, model=?, permission_mode=?,
+		UPDATE jobs SET cron=?, timezone=?, cwd=?, command=?, prompt=?, model=?, provider=?, permission_mode=?,
 			max_concurrent=?, timeout_seconds=?, keep=?, updated_at=?
 		WHERE id=?`,
 		j.Cron, j.Timezone, j.Cwd, nullableStr(j.Command), nullableStr(j.Prompt), nullableStr(j.Model),
-		nullableStr(j.PermissionMode), j.MaxConcurrent, nullableInt(j.TimeoutSeconds), j.Keep,
+		nullableStr(j.Provider), nullableStr(j.PermissionMode), j.MaxConcurrent, nullableInt(j.TimeoutSeconds), j.Keep,
 		timeToStr(time.Now()), id)
 	return err
 }
@@ -423,7 +449,7 @@ func (s *Store) StartRun(ctx context.Context, jobID, runID, trigger, logPath str
 
 func (s *Store) getJobTx(ctx context.Context, tx *sql.Tx, id string) (Job, error) {
 	row := tx.QueryRowContext(ctx, `
-		SELECT id, kind, cron, timezone, enabled, cwd, command, prompt, model,
+		SELECT id, kind, cron, timezone, enabled, cwd, command, prompt, model, provider,
 		       permission_mode, max_concurrent, timeout_seconds, keep, created_at, updated_at
 		FROM jobs WHERE id = ?`, id)
 	return scanJob(row)
@@ -548,7 +574,7 @@ func placeholders(n int) string {
 // EnabledJobs returns every job with enabled=1.
 func (s *Store) EnabledJobs(ctx context.Context) ([]Job, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, kind, cron, timezone, enabled, cwd, command, prompt, model,
+		SELECT id, kind, cron, timezone, enabled, cwd, command, prompt, model, provider,
 		       permission_mode, max_concurrent, timeout_seconds, keep, created_at, updated_at
 		FROM jobs WHERE enabled = 1 ORDER BY id`)
 	if err != nil {
@@ -559,10 +585,10 @@ func (s *Store) EnabledJobs(ctx context.Context) ([]Job, error) {
 	for rows.Next() {
 		var j Job
 		var enabled int
-		var command, prompt, model, permMode sql.NullString
+		var command, prompt, model, provider, permMode sql.NullString
 		var timeoutSeconds sql.NullInt64
 		var createdAt, updatedAt string
-		if err := rows.Scan(&j.ID, &j.Kind, &j.Cron, &j.Timezone, &enabled, &j.Cwd, &command, &prompt, &model,
+		if err := rows.Scan(&j.ID, &j.Kind, &j.Cron, &j.Timezone, &enabled, &j.Cwd, &command, &prompt, &model, &provider,
 			&permMode, &j.MaxConcurrent, &timeoutSeconds, &j.Keep, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
@@ -570,6 +596,7 @@ func (s *Store) EnabledJobs(ctx context.Context) ([]Job, error) {
 		j.Command = command.String
 		j.Prompt = prompt.String
 		j.Model = model.String
+		j.Provider = provider.String
 		j.PermissionMode = permMode.String
 		j.TimeoutSeconds = timeoutSeconds.Int64
 		if j.CreatedAt, err = strToTime(createdAt); err != nil {

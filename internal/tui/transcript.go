@@ -116,3 +116,130 @@ func firstLine(s string) string {
 	}
 	return s
 }
+
+// openCodePart mirrors the bits of opencode's `run --format json` events
+// worth rendering, captured directly from the real CLI (v1.18.21): each
+// line's top-level "type" is one of tool_use/text/error/step_start/
+// step_finish; the nested "part" object restates a similar but not
+// identical type (tool/text/step-start/step-finish, hyphenated).
+type openCodePart struct {
+	Type string `json:"type"` // tool_use | text | error | step_start | step_finish
+	Part struct {
+		Tool  string `json:"tool"`
+		Text  string `json:"text"`
+		State struct {
+			Input  json.RawMessage `json:"input"`
+			Output string          `json:"output"`
+		} `json:"state"`
+	} `json:"part"`
+	Error struct {
+		Name string `json:"name"`
+		Data struct {
+			Message string `json:"message"`
+		} `json:"data"`
+	} `json:"error"`
+}
+
+// renderOpenCodeTranscript turns a captured opencode `run --format json`
+// log into the same kind of readable transcript renderTranscript produces
+// for claude: assistant text, one-line tool call summaries. opencode has
+// no distinct terminal "result" event (see runOpenCodeAgent's comment), so
+// there's no closing "--- result ---" line to render here.
+func renderOpenCodeTranscript(raw string) string {
+	var out strings.Builder
+	scanner := bufio.NewScanner(strings.NewReader(raw))
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var ev openCodePart
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			out.WriteString(line + "\n")
+			continue
+		}
+		switch ev.Type {
+		case "text":
+			if strings.TrimSpace(ev.Part.Text) != "" {
+				fmt.Fprintf(&out, "%s\n\n", ev.Part.Text)
+			}
+		case "tool_use":
+			fmt.Fprintf(&out, "> %s(%s)\n", ev.Part.Tool, compactJSON(ev.Part.State.Input))
+			if ev.Part.State.Output != "" {
+				fmt.Fprintf(&out, "< %s\n", firstLine(ev.Part.State.Output))
+			}
+		case "error":
+			fmt.Fprintf(&out, "--- error: %s ---\n%s\n", ev.Error.Name, ev.Error.Data.Message)
+		default:
+			// step_start/step_finish: internal turn bookkeeping, not part
+			// of the readable transcript.
+		}
+	}
+	if out.Len() == 0 {
+		return raw
+	}
+	return out.String()
+}
+
+// codexPart mirrors the bits of codex's `exec --json` events worth
+// rendering. Only the error path has been observed against the real CLI
+// (0.148.0) on this box — see runCodexAgent's comment — so
+// item.completed's assistant-text shape below is inferred from codex's
+// documented JSONL event model, not independently verified here; unknown
+// shapes fall back to the raw line rather than erroring, same as
+// renderTranscript.
+type codexPart struct {
+	Type string `json:"type"` // thread.started | turn.started | item.completed | turn.failed | error
+	Item struct {
+		Type    string `json:"type"` // e.g. "agent_message", "error"
+		Text    string `json:"text"`
+		Message string `json:"message"`
+	} `json:"item"`
+	Error struct {
+		Message string `json:"message"`
+	} `json:"error"`
+	Message string `json:"message"` // top-level "error" events
+}
+
+// renderCodexTranscript is codex's counterpart to renderTranscript.
+func renderCodexTranscript(raw string) string {
+	var out strings.Builder
+	scanner := bufio.NewScanner(strings.NewReader(raw))
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var ev codexPart
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			out.WriteString(line + "\n")
+			continue
+		}
+		switch ev.Type {
+		case "thread.started":
+			// thread_id isn't rendered here — it's captured separately as
+			// the run's session id (see runCodexAgent).
+		case "item.completed":
+			switch ev.Item.Type {
+			case "error":
+				fmt.Fprintf(&out, "--- error ---\n%s\n", ev.Item.Message)
+			default:
+				if strings.TrimSpace(ev.Item.Text) != "" {
+					fmt.Fprintf(&out, "%s\n\n", ev.Item.Text)
+				}
+			}
+		case "turn.failed":
+			fmt.Fprintf(&out, "--- turn failed ---\n%s\n", ev.Error.Message)
+		case "error":
+			fmt.Fprintf(&out, "--- error ---\n%s\n", ev.Message)
+		default:
+			// turn.started/etc: internal bookkeeping, not rendered.
+		}
+	}
+	if out.Len() == 0 {
+		return raw
+	}
+	return out.String()
+}

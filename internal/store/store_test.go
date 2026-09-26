@@ -12,10 +12,10 @@ import (
 
 // TestMigrationAddsDurationMsToExistingDB is the regression test for
 // opening a real, pre-existing database (like the one on this box) that
-// predates the duration_ms column: additiveMigrations must add it via
-// ALTER TABLE without erroring, existing rows must stay readable (with
-// DurationMs simply invalid, not a crash), and newly finished runs must
-// get a real value.
+// predates the duration_ms *and* provider columns: additiveMigrations must
+// add both via ALTER TABLE without erroring, existing rows must stay
+// readable (with DurationMs invalid and Provider "" — meaning claude, not
+// a crash), and newly created/finished rows must get real values.
 func TestMigrationAddsDurationMsToExistingDB(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "old.db")
 
@@ -69,6 +69,29 @@ func TestMigrationAddsDurationMsToExistingDB(t *testing.T) {
 	}
 	if oldRun.DurationMs.Valid {
 		t.Fatalf("a pre-migration row should have no duration_ms, got %+v", oldRun.DurationMs)
+	}
+
+	oldJob, err := st.GetJob(ctx, "old-job")
+	if err != nil {
+		t.Fatalf("GetJob on a migrated pre-existing row: %v", err)
+	}
+	if oldJob.Provider != "" {
+		t.Fatalf("a pre-migration job should have an empty provider (meaning claude), got %q", oldJob.Provider)
+	}
+
+	// A job created after the migration must round-trip a real provider.
+	if err := st.CreateJob(ctx, Job{
+		ID: "new-job", Kind: "agent", Cron: "0 0 * * *", Timezone: "local", Enabled: true,
+		Cwd: "/tmp", Prompt: "hi", Provider: "opencode",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	newJob, err := st.GetJob(ctx, "new-job")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newJob.Provider != "opencode" {
+		t.Fatalf("want provider=opencode, got %q", newJob.Provider)
 	}
 
 	// A run created and finished after the migration must get a real one.

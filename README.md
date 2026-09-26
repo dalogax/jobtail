@@ -19,7 +19,7 @@
 `jobtail` is a small scheduler and dashboard for two kinds of recurring job:
 
 - **`cli`** — a plain shell command (a health check, a backup script, a cleanup task).
-- **`agent`** — a headless [Claude Code](https://claude.com/claude-code) turn: a prompt, a working directory, and a model. The full transcript is captured and rendered as a readable log, not raw JSON.
+- **`agent`** — a headless turn from [Claude Code](https://claude.com/claude-code), [opencode](https://opencode.ai), or [Codex](https://github.com/openai/codex): a prompt, a working directory, a model, and `--provider` to pick which CLI runs it (default `claude`). The full transcript is captured and rendered as a readable log, not raw JSON — the parser is provider-aware, so this works the same regardless of which agent CLI a job uses.
 
 A `systemd --user` timer checks for due jobs once a minute; each due job runs as its own process and writes its own log file. Everything — job definitions, run history, status — lives in one SQLite database. There's no daemon of jobtail's own to keep alive, and nothing tying it to any particular terminal, multiplexer, or session.
 
@@ -58,13 +58,21 @@ jobtail install-systemd --enable
 
 ## Using it with AI coding agents
 
-`--kind agent` jobs run `claude -p --output-format stream-json` under the hood — the same headless mode Claude Code itself exposes, just on a schedule instead of triggered by hand. Nothing agent-specific needs a special environment: give it a prompt and a working directory, same as a `cli` job needs a command and a working directory.
+`--kind agent` jobs run a headless turn from whichever CLI `--provider` names — `claude` (default), `opencode`, or `codex` — the same non-interactive mode each of those tools exposes on its own, just on a schedule instead of triggered by hand:
+
+```sh
+jobtail add nightly-review --kind agent --provider opencode --cron "0 3 * * *" \
+  --cwd ~/code/myproject --model opencode/big-pickle \
+  --prompt "Check for outdated dependencies. Open a PR if it's safe to update; otherwise report why not."
+```
+
+Nothing agent-specific needs a special environment: give it a prompt and a working directory, same as a `cli` job needs a command and a working directory.
 
 A few things exist specifically because the job is an agent, not a shell command:
 
-- **Readable transcripts, not raw JSON.** The log pane parses the stream and shows assistant text, tool calls (with their input), and the final result — not a wall of `{"type":"assistant",...}`.
-- **Session capture + resume.** Every agent run's session id is captured as soon as it starts, even if the run later fails. `jobtail resume <run-id>` hands a failed run to an interactive `claude --resume` session, so you can pick up exactly where an unattended run got stuck instead of starting over.
-- **A sane default permission mode.** Unattended runs default to `acceptEdits` — auto-accepts file edits, never `bypassPermissions` unless a job explicitly opts in. (Avoid `--permission-mode plan` for scheduled jobs: it expects an interactive approval that headless mode can never provide, and the run will just hang.)
+- **Readable transcripts, not raw JSON.** The log pane parses each provider's own event stream and shows assistant text, tool calls (with their input), and the final result — not a wall of `{"type":"assistant",...}`.
+- **Session capture + resume.** Every agent run's session (or, for codex, thread) id is captured as soon as it starts, even if the run later fails. `jobtail resume <run-id>` hands a failed run to an interactive session in the same CLI that produced it (`claude --resume`, `opencode --session`, or `codex resume`), so you can pick up exactly where an unattended run got stuck instead of starting over.
+- **A sane default permission mode.** Unattended `claude`/`codex` runs default to `acceptEdits`/`workspace-write` respectively — auto-accepts file edits, never `bypassPermissions`/`danger-full-access` unless a job explicitly opts in via `--permission-mode` (its meaning is provider-specific — see `jobtail add --help`). (Avoid `--permission-mode plan` for scheduled `claude` jobs: it expects an interactive approval that headless mode can never provide, and the run will just hang.)
 
 This isn't tied to any particular terminal or workflow — it works the same whether you're driving it from a plain SSH session, tmux, or nothing open at all (the systemd timer doesn't need a terminal to fire).
 

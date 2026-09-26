@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/dalogax/jobtail/internal/cronx"
+	"github.com/dalogax/jobtail/internal/execengine"
 	"github.com/dalogax/jobtail/internal/runner"
 	"github.com/dalogax/jobtail/internal/store"
 )
@@ -238,7 +239,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		atBottom := m.logVP.AtBottom()
-		m.logVP.SetContent(wrapForViewport(renderLog(msg.text, m.selectedJobKind()), m.logVP.Width))
+		m.logVP.SetContent(wrapForViewport(renderLog(msg.text, m.selectedJobKind(), m.selectedJobProvider()), m.logVP.Width))
 		if atBottom {
 			m.logVP.GotoBottom()
 		}
@@ -600,6 +601,13 @@ func (m model) selectedJobKind() string {
 	return ""
 }
 
+func (m model) selectedJobProvider() string {
+	if j := m.selectedJob(); j != nil {
+		return j.Provider
+	}
+	return ""
+}
+
 func (m *model) selectJobByID(id string) {
 	for i, j := range m.jobs {
 		if j.ID == id {
@@ -730,13 +738,21 @@ func paneStyle(focused bool) lipgloss.Style {
 }
 
 // renderLog renders a run's captured output for the log pane: agent
-// transcripts (stream-json) get a lightly parsed, readable rendering;
-// cli logs are shown as-is (PRD §9).
-func renderLog(raw, jobKind string) string {
+// transcripts get a lightly parsed, readable rendering (which parser
+// depends on which agent CLI produced the log — PRD §14); cli logs are
+// shown as-is (PRD §9).
+func renderLog(raw, jobKind, provider string) string {
 	if jobKind != "agent" {
 		return raw
 	}
-	return renderTranscript(raw)
+	switch execengine.EffectiveProvider(provider) {
+	case execengine.ProviderOpenCode:
+		return renderOpenCodeTranscript(raw)
+	case execengine.ProviderCodex:
+		return renderCodexTranscript(raw)
+	default:
+		return renderTranscript(raw)
+	}
 }
 
 // wrapForViewport word-wraps text to width before handing it to
