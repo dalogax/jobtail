@@ -121,6 +121,13 @@ func TestTUINavigatesJobsToRunsToLog(t *testing.T) {
 	if !strings.Contains(m.View(), "● greet") {
 		t.Fatalf("expected the enabled marker on greet:\n%s", m.View())
 	}
+	// The jobs pane's last-status cell is its rightmost column — exactly
+	// what a viewport-width miscalculation clips first without an obvious
+	// symptom elsewhere (found only by actually screenshotting the TUI).
+	// Assert on it explicitly so that class of regression fails here.
+	if !strings.Contains(m.View(), "ok") {
+		t.Fatalf("jobs pane missing the last-status column value ('ok'):\n%s", m.View())
+	}
 
 	m = send(t, m, special(tea.KeyEnter)) // jobs -> runs
 	if m.focus != focusRuns {

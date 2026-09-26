@@ -278,11 +278,16 @@ func (m *model) layout() {
 // columnsWidth sums what SetColumns just laid out, so the table's viewport
 // (which SetWidth controls) never clips a cell short of its own declared
 // width — a mismatch there is what silently truncated column content
-// mid-cell before this was fixed.
+// mid-cell before this was fixed. +2 per column: bubbles/table's default
+// Cell/Header style is Padding(0, 1) — one padding column on each side —
+// which is real rendered width the raw Column.Width doesn't include; missing
+// it here under-sized the viewport by 2*len(cols) and silently clipped the
+// last column entirely (found by actually screenshotting the TUI: the
+// Status column's header showed but every row's value was gone).
 func columnsWidth(cols []table.Column) int {
 	w := 0
 	for _, c := range cols {
-		w += c.Width
+		w += c.Width + 2
 	}
 	return w
 }

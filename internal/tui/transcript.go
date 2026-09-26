@@ -33,6 +33,7 @@ type transcriptLine struct {
 // result line — not raw JSON (PRD §9).
 func renderTranscript(raw string) string {
 	var out strings.Builder
+	var lastText string
 	scanner := bufio.NewScanner(strings.NewReader(raw))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
@@ -56,6 +57,7 @@ func renderTranscript(raw string) string {
 				case "text":
 					if strings.TrimSpace(c.Text) != "" {
 						fmt.Fprintf(&out, "%s\n\n", c.Text)
+						lastText = c.Text
 					}
 				case "tool_use":
 					fmt.Fprintf(&out, "> %s(%s)\n", c.Name, compactJSON(c.Input))
@@ -68,9 +70,19 @@ func renderTranscript(raw string) string {
 			if ev.IsError != nil && *ev.IsError {
 				status = "error"
 			}
-			fmt.Fprintf(&out, "--- result: %s ---\n%s\n", status, ev.Result)
+			fmt.Fprintf(&out, "--- result: %s ---\n", status)
+			// The result event's own text is often just a repeat of the
+			// last assistant message already printed above; only show it
+			// again when it actually adds something.
+			if ev.Result != "" && ev.Result != lastText {
+				fmt.Fprintf(&out, "%s\n", ev.Result)
+			}
 		default:
-			out.WriteString(line + "\n")
+			// system/hook/rate_limit_event/thinking_tokens/etc: internal
+			// bookkeeping events, not part of the readable transcript.
+			// Dropped, not dumped as raw JSON (found via an actual
+			// screenshot: a rate_limit_event line was leaking straight
+			// through as an unparsed JSON blob).
 		}
 	}
 	if out.Len() == 0 {
