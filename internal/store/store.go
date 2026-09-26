@@ -1,0 +1,592 @@
+// Package store is jobtail's SQLite-backed data layer: jobs and their runs.
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	_ "modernc.org/sqlite"
+)
+
+const schema = `
+CREATE TABLE IF NOT EXISTS jobs (
+  id              TEXT PRIMARY KEY,
+  kind            TEXT NOT NULL,
+  cron            TEXT NOT NULL,
+  timezone        TEXT NOT NULL DEFAULT 'local',
+  enabled         INTEGER NOT NULL DEFAULT 1,
+  cwd             TEXT NOT NULL,
+  command         TEXT,
+  prompt          TEXT,
+  model           TEXT,
+  permission_mode TEXT,
+  max_concurrent  INTEGER NOT NULL DEFAULT 1,
+  timeout_seconds INTEGER,
+  keep            INTEGER NOT NULL DEFAULT 200,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS runs (
+  id            TEXT PRIMARY KEY,
+  job_id        TEXT NOT NULL REFERENCES jobs(id),
+  trigger       TEXT NOT NULL,
+  status        TEXT NOT NULL,
+  started_at    TEXT NOT NULL,
+  finished_at   TEXT,
+  exit_code     INTEGER,
+  session_id    TEXT,
+  log_path      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_runs_job ON runs(job_id, started_at DESC);
+`
+
+type Job struct {
+	ID             string
+	Kind           string // "cli" | "agent"
+	Cron           string
+	Timezone       string // "local" or an IANA name
+	Enabled        bool
+	Cwd            string
+	Command        string
+	Prompt         string
+	Model          string
+	PermissionMode string
+	MaxConcurrent  int
+	TimeoutSeconds int64 // 0 = no timeout
+	Keep           int
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+type Run struct {
+	ID         string
+	JobID      string
+	Trigger    string // "scheduled" | "manual" | "resume"
+	Status     string // "running" | "ok" | "failed" | "timeout" | "skipped_overlap"
+	StartedAt  time.Time
+	FinishedAt sql.NullTime
+	ExitCode   sql.NullInt64
+	SessionID  sql.NullString
+	LogPath    string
+}
+
+// JobSummary is a Job plus derived run stats, as shown in `list`/the TUI job pane.
+type JobSummary struct {
+	Job
+	RunCount   int
+	LastStatus string // "" if never run
+	LastRunAt  sql.NullTime
+}
+
+var ErrNotFound = errors.New("not found")
+var ErrAlreadyExists = errors.New("already exists")
+var ErrOverlap = errors.New("a run is already active for this job")
+
+type Store struct {
+	db *sql.DB
+}
+
+func Open(path string) (*Store, error) {
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
+	if err != nil {
+		return nil, fmt.Errorf("open db: %w", err)
+	}
+	db.SetMaxOpenConns(1) // modernc.org/sqlite: one *connection* per process is simplest and avoids intra-process lock churn; cross-process concurrency is handled by WAL + busy_timeout above.
+	if _, err := db.Exec(schema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	return &Store{db: db}, nil
+}
+
+func (s *Store) Close() error { return s.db.Close() }
+
+func timeToStr(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
+
+func strToTime(s string) (time.Time, error) { return time.Parse(time.RFC3339Nano, s) }
+
+func (s *Store) CreateJob(ctx context.Context, j Job) error {
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM jobs WHERE id = ?`, j.ID).Scan(&exists); err == nil {
+		return ErrAlreadyExists
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	now := timeToStr(time.Now())
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO jobs (id, kind, cron, timezone, enabled, cwd, command, prompt, model,
+			permission_mode, max_concurrent, timeout_seconds, keep, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		j.ID, j.Kind, j.Cron, j.Timezone, boolToInt(j.Enabled), j.Cwd,
+		nullableStr(j.Command), nullableStr(j.Prompt), nullableStr(j.Model), nullableStr(j.PermissionMode),
+		j.MaxConcurrent, nullableInt(j.TimeoutSeconds), j.Keep, now, now)
+	return err
+}
+
+func (s *Store) GetJob(ctx context.Context, id string) (Job, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, kind, cron, timezone, enabled, cwd, command, prompt, model,
+		       permission_mode, max_concurrent, timeout_seconds, keep, created_at, updated_at
+		FROM jobs WHERE id = ?`, id)
+	return scanJob(row)
+}
+
+func scanJob(row *sql.Row) (Job, error) {
+	var j Job
+	var enabled int
+	var command, prompt, model, permMode sql.NullString
+	var timeoutSeconds sql.NullInt64
+	var createdAt, updatedAt string
+	err := row.Scan(&j.ID, &j.Kind, &j.Cron, &j.Timezone, &enabled, &j.Cwd, &command, &prompt, &model,
+		&permMode, &j.MaxConcurrent, &timeoutSeconds, &j.Keep, &createdAt, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Job{}, ErrNotFound
+	}
+	if err != nil {
+		return Job{}, err
+	}
+	j.Enabled = enabled != 0
+	j.Command = command.String
+	j.Prompt = prompt.String
+	j.Model = model.String
+	j.PermissionMode = permMode.String
+	j.TimeoutSeconds = timeoutSeconds.Int64
+	j.CreatedAt, err = strToTime(createdAt)
+	if err != nil {
+		return Job{}, err
+	}
+	j.UpdatedAt, err = strToTime(updatedAt)
+	if err != nil {
+		return Job{}, err
+	}
+	return j, nil
+}
+
+func (s *Store) ListJobs(ctx context.Context) ([]JobSummary, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT j.id, j.kind, j.cron, j.timezone, j.enabled, j.cwd, j.command, j.prompt, j.model,
+		       j.permission_mode, j.max_concurrent, j.timeout_seconds, j.keep, j.created_at, j.updated_at,
+		       (SELECT COUNT(*) FROM runs r WHERE r.job_id = j.id) AS run_count,
+		       (SELECT r2.status FROM runs r2 WHERE r2.job_id = j.id ORDER BY r2.started_at DESC LIMIT 1) AS last_status,
+		       (SELECT r3.started_at FROM runs r3 WHERE r3.job_id = j.id ORDER BY r3.started_at DESC LIMIT 1) AS last_run_at
+		FROM jobs j ORDER BY j.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []JobSummary
+	for rows.Next() {
+		var js JobSummary
+		var enabled int
+		var command, prompt, model, permMode, lastStatus, lastRunAt sql.NullString
+		var timeoutSeconds sql.NullInt64
+		var createdAt, updatedAt string
+		if err := rows.Scan(&js.ID, &js.Kind, &js.Cron, &js.Timezone, &enabled, &js.Cwd, &command, &prompt, &model,
+			&permMode, &js.MaxConcurrent, &timeoutSeconds, &js.Keep, &createdAt, &updatedAt,
+			&js.RunCount, &lastStatus, &lastRunAt); err != nil {
+			return nil, err
+		}
+		js.Enabled = enabled != 0
+		js.Command = command.String
+		js.Prompt = prompt.String
+		js.Model = model.String
+		js.PermissionMode = permMode.String
+		js.TimeoutSeconds = timeoutSeconds.Int64
+		js.LastStatus = lastStatus.String
+		if js.CreatedAt, err = strToTime(createdAt); err != nil {
+			return nil, err
+		}
+		if js.UpdatedAt, err = strToTime(updatedAt); err != nil {
+			return nil, err
+		}
+		if lastRunAt.Valid {
+			t, err := strToTime(lastRunAt.String)
+			if err != nil {
+				return nil, err
+			}
+			js.LastRunAt = sql.NullTime{Time: t, Valid: true}
+		}
+		out = append(out, js)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SetEnabled(ctx context.Context, id string, enabled bool) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE jobs SET enabled = ?, updated_at = ? WHERE id = ?`,
+		boolToInt(enabled), timeToStr(time.Now()), id)
+	if err != nil {
+		return err
+	}
+	return checkRowsAffected(res)
+}
+
+func (s *Store) DeleteJob(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM jobs WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if err := checkRowsAffected(res); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `DELETE FROM runs WHERE job_id = ?`, id)
+	return err
+}
+
+// EditJob applies a sparse patch: zero-value fields in patch are left unchanged
+// except where the corresponding *Set flag is true.
+type JobPatch struct {
+	Cron           *string
+	Timezone       *string
+	Cwd            *string
+	Command        *string
+	Prompt         *string
+	Model          *string
+	PermissionMode *string
+	MaxConcurrent  *int
+	TimeoutSeconds *int64
+	Keep           *int
+}
+
+func (s *Store) EditJob(ctx context.Context, id string, p JobPatch) error {
+	j, err := s.GetJob(ctx, id)
+	if err != nil {
+		return err
+	}
+	if p.Cron != nil {
+		j.Cron = *p.Cron
+	}
+	if p.Timezone != nil {
+		j.Timezone = *p.Timezone
+	}
+	if p.Cwd != nil {
+		j.Cwd = *p.Cwd
+	}
+	if p.Command != nil {
+		j.Command = *p.Command
+	}
+	if p.Prompt != nil {
+		j.Prompt = *p.Prompt
+	}
+	if p.Model != nil {
+		j.Model = *p.Model
+	}
+	if p.PermissionMode != nil {
+		j.PermissionMode = *p.PermissionMode
+	}
+	if p.MaxConcurrent != nil {
+		j.MaxConcurrent = *p.MaxConcurrent
+	}
+	if p.TimeoutSeconds != nil {
+		j.TimeoutSeconds = *p.TimeoutSeconds
+	}
+	if p.Keep != nil {
+		j.Keep = *p.Keep
+	}
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE jobs SET cron=?, timezone=?, cwd=?, command=?, prompt=?, model=?, permission_mode=?,
+			max_concurrent=?, timeout_seconds=?, keep=?, updated_at=?
+		WHERE id=?`,
+		j.Cron, j.Timezone, j.Cwd, nullableStr(j.Command), nullableStr(j.Prompt), nullableStr(j.Model),
+		nullableStr(j.PermissionMode), j.MaxConcurrent, nullableInt(j.TimeoutSeconds), j.Keep,
+		timeToStr(time.Now()), id)
+	return err
+}
+
+// activeRunCount returns how many runs for jobID are still status='running'.
+func (s *Store) activeRunCount(ctx context.Context, jobID string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE job_id = ? AND status = 'running'`, jobID).Scan(&n)
+	return n, err
+}
+
+// StartRun creates a new run row with status='running'. If the job's
+// max_concurrent is already met by in-flight runs, it instead records a
+// status='skipped_overlap' row and returns ErrOverlap.
+func (s *Store) StartRun(ctx context.Context, jobID, runID, trigger, logPath string, startedAt time.Time) (Run, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Run{}, err
+	}
+	defer tx.Rollback()
+
+	j, err := s.getJobTx(ctx, tx, jobID)
+	if err != nil {
+		return Run{}, err
+	}
+
+	var active int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE job_id = ? AND status = 'running'`, jobID).Scan(&active); err != nil {
+		return Run{}, err
+	}
+
+	r := Run{ID: runID, JobID: jobID, Trigger: trigger, StartedAt: startedAt, LogPath: logPath}
+	overlap := active >= j.MaxConcurrent
+	if overlap {
+		r.Status = "skipped_overlap"
+	} else {
+		r.Status = "running"
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO runs (id, job_id, trigger, status, started_at, log_path) VALUES (?, ?, ?, ?, ?, ?)`,
+		r.ID, r.JobID, r.Trigger, r.Status, timeToStr(r.StartedAt), r.LogPath); err != nil {
+		return Run{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Run{}, err
+	}
+	if overlap {
+		return r, ErrOverlap
+	}
+	return r, nil
+}
+
+func (s *Store) getJobTx(ctx context.Context, tx *sql.Tx, id string) (Job, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, kind, cron, timezone, enabled, cwd, command, prompt, model,
+		       permission_mode, max_concurrent, timeout_seconds, keep, created_at, updated_at
+		FROM jobs WHERE id = ?`, id)
+	return scanJob(row)
+}
+
+func (s *Store) SetRunSessionID(ctx context.Context, runID, sessionID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE runs SET session_id = ? WHERE id = ?`, sessionID, runID)
+	return err
+}
+
+func (s *Store) FinishRun(ctx context.Context, runID, status string, exitCode int, finishedAt time.Time) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE runs SET status = ?, exit_code = ?, finished_at = ? WHERE id = ?`,
+		status, exitCode, timeToStr(finishedAt), runID)
+	if err != nil {
+		return err
+	}
+	return checkRowsAffected(res)
+}
+
+func (s *Store) GetRun(ctx context.Context, id string) (Run, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, job_id, trigger, status, started_at, finished_at, exit_code, session_id, log_path
+		FROM runs WHERE id = ?`, id)
+	return scanRun(row)
+}
+
+func scanRun(row *sql.Row) (Run, error) {
+	var r Run
+	var startedAt string
+	var finishedAt, sessionID sql.NullString
+	var exitCode sql.NullInt64
+	err := row.Scan(&r.ID, &r.JobID, &r.Trigger, &r.Status, &startedAt, &finishedAt, &exitCode, &sessionID, &r.LogPath)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Run{}, ErrNotFound
+	}
+	if err != nil {
+		return Run{}, err
+	}
+	if r.StartedAt, err = strToTime(startedAt); err != nil {
+		return Run{}, err
+	}
+	if finishedAt.Valid {
+		t, err := strToTime(finishedAt.String)
+		if err != nil {
+			return Run{}, err
+		}
+		r.FinishedAt = sql.NullTime{Time: t, Valid: true}
+	}
+	r.ExitCode = exitCode
+	r.SessionID = sessionID
+	return r, nil
+}
+
+func (s *Store) ListRuns(ctx context.Context, jobID string, limit int) ([]Run, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, job_id, trigger, status, started_at, finished_at, exit_code, session_id, log_path
+		FROM runs WHERE job_id = ? ORDER BY started_at DESC LIMIT ?`, jobID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Run
+	for rows.Next() {
+		var r Run
+		var startedAt string
+		var finishedAt, sessionID sql.NullString
+		var exitCode sql.NullInt64
+		if err := rows.Scan(&r.ID, &r.JobID, &r.Trigger, &r.Status, &startedAt, &finishedAt, &exitCode, &sessionID, &r.LogPath); err != nil {
+			return nil, err
+		}
+		if r.StartedAt, err = strToTime(startedAt); err != nil {
+			return nil, err
+		}
+		if finishedAt.Valid {
+			t, err := strToTime(finishedAt.String)
+			if err != nil {
+				return nil, err
+			}
+			r.FinishedAt = sql.NullTime{Time: t, Valid: true}
+		}
+		r.ExitCode = exitCode
+		r.SessionID = sessionID
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// LastRun returns the most recent run for a job matching one of the given
+// triggers (pass nil for any trigger), or ErrNotFound if there is none.
+func (s *Store) LastRun(ctx context.Context, jobID string, triggers ...string) (Run, error) {
+	q := `SELECT id, job_id, trigger, status, started_at, finished_at, exit_code, session_id, log_path
+		FROM runs WHERE job_id = ?`
+	args := []any{jobID}
+	if len(triggers) > 0 {
+		q += ` AND trigger IN (` + placeholders(len(triggers)) + `)`
+		for _, t := range triggers {
+			args = append(args, t)
+		}
+	}
+	q += ` ORDER BY started_at DESC LIMIT 1`
+	row := s.db.QueryRowContext(ctx, q, args...)
+	return scanRun(row)
+}
+
+func placeholders(n int) string {
+	out := ""
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			out += ","
+		}
+		out += "?"
+	}
+	return out
+}
+
+// EnabledJobs returns every job with enabled=1.
+func (s *Store) EnabledJobs(ctx context.Context) ([]Job, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, kind, cron, timezone, enabled, cwd, command, prompt, model,
+		       permission_mode, max_concurrent, timeout_seconds, keep, created_at, updated_at
+		FROM jobs WHERE enabled = 1 ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Job
+	for rows.Next() {
+		var j Job
+		var enabled int
+		var command, prompt, model, permMode sql.NullString
+		var timeoutSeconds sql.NullInt64
+		var createdAt, updatedAt string
+		if err := rows.Scan(&j.ID, &j.Kind, &j.Cron, &j.Timezone, &enabled, &j.Cwd, &command, &prompt, &model,
+			&permMode, &j.MaxConcurrent, &timeoutSeconds, &j.Keep, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		j.Enabled = enabled != 0
+		j.Command = command.String
+		j.Prompt = prompt.String
+		j.Model = model.String
+		j.PermissionMode = permMode.String
+		j.TimeoutSeconds = timeoutSeconds.Int64
+		if j.CreatedAt, err = strToTime(createdAt); err != nil {
+			return nil, err
+		}
+		if j.UpdatedAt, err = strToTime(updatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+// GC prunes runs beyond each job's retention count (job.Keep), deleting the
+// oldest rows first. It returns the deleted run IDs so the caller can also
+// remove their log files.
+func (s *Store) GC(ctx context.Context) ([]string, error) {
+	jobs, err := s.allJobIDsAndKeep(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var deleted []string
+	for jobID, keep := range jobs {
+		rows, err := s.db.QueryContext(ctx, `
+			SELECT id FROM runs WHERE job_id = ? ORDER BY started_at DESC LIMIT -1 OFFSET ?`, jobID, keep)
+		if err != nil {
+			return deleted, err
+		}
+		var ids []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return deleted, err
+			}
+			ids = append(ids, id)
+		}
+		rows.Close()
+		for _, id := range ids {
+			if _, err := s.db.ExecContext(ctx, `DELETE FROM runs WHERE id = ?`, id); err != nil {
+				return deleted, err
+			}
+			deleted = append(deleted, id)
+		}
+	}
+	return deleted, nil
+}
+
+func (s *Store) allJobIDsAndKeep(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, keep FROM jobs`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var id string
+		var keep int
+		if err := rows.Scan(&id, &keep); err != nil {
+			return nil, err
+		}
+		out[id] = keep
+	}
+	return out, rows.Err()
+}
+
+func checkRowsAffected(res sql.Result) error {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func nullableStr(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func nullableInt(n int64) any {
+	if n == 0 {
+		return nil
+	}
+	return n
+}

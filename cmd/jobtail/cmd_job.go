@@ -1,0 +1,343 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"text/tabwriter"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/jarvis0064/jobtail/internal/cronx"
+	"github.com/jarvis0064/jobtail/internal/store"
+)
+
+func newAddCmd() *cobra.Command {
+	var kind, cronExpr, cwd, command, prompt, model, permMode, timezone string
+	var maxConcurrent, keep int
+	var timeoutSeconds int64
+
+	cmd := &cobra.Command{
+		Use:   "add <id>",
+		Short: "Register a new scheduled job",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id := args[0]
+			if kind != "cli" && kind != "agent" {
+				return fmt.Errorf("--kind must be \"cli\" or \"agent\", got %q", kind)
+			}
+			if cronExpr == "" {
+				return fmt.Errorf("--cron is required")
+			}
+			if err := cronx.Validate(cronExpr); err != nil {
+				return fmt.Errorf("invalid --cron: %w", err)
+			}
+			if cwd == "" {
+				return fmt.Errorf("--cwd is required")
+			}
+			if kind == "cli" && command == "" {
+				return fmt.Errorf("--cmd is required for --kind cli")
+			}
+			if kind == "agent" && prompt == "" {
+				return fmt.Errorf("--prompt is required for --kind agent")
+			}
+			if timezone == "" {
+				timezone = "local"
+			}
+			if maxConcurrent <= 0 {
+				maxConcurrent = 1
+			}
+			if keep <= 0 {
+				keep = 200
+			}
+
+			a, err := openApp()
+			if err != nil {
+				return err
+			}
+			defer a.st.Close()
+
+			j := store.Job{
+				ID: id, Kind: kind, Cron: cronExpr, Timezone: timezone, Enabled: true,
+				Cwd: cwd, Command: command, Prompt: prompt, Model: model, PermissionMode: permMode,
+				MaxConcurrent: maxConcurrent, TimeoutSeconds: timeoutSeconds, Keep: keep,
+			}
+			if err := a.st.CreateJob(context.Background(), j); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "added job %q (%s)\n", id, kind)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&kind, "kind", "", `job kind: "cli" or "agent"`)
+	cmd.Flags().StringVar(&cronExpr, "cron", "", "5-field cron expression")
+	cmd.Flags().StringVar(&cwd, "cwd", "", "working directory the job runs in")
+	cmd.Flags().StringVar(&command, "cmd", "", "shell command (kind=cli)")
+	cmd.Flags().StringVar(&prompt, "prompt", "", "agent task prompt (kind=agent)")
+	cmd.Flags().StringVar(&model, "model", "", "model alias, e.g. sonnet (kind=agent)")
+	cmd.Flags().StringVar(&permMode, "permission-mode", "", "permission mode (kind=agent, default acceptEdits)")
+	cmd.Flags().StringVar(&timezone, "timezone", "local", `cron timezone: "local" or an IANA name`)
+	cmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 1, "max simultaneous runs of this job")
+	cmd.Flags().Int64Var(&timeoutSeconds, "timeout-seconds", 0, "hard kill after N seconds (0 = no timeout)")
+	cmd.Flags().IntVar(&keep, "keep", 200, "how many past runs to retain")
+	return cmd
+}
+
+func newListCmd() *cobra.Command {
+	var asJSON bool
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List all jobs",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := openApp()
+			if err != nil {
+				return err
+			}
+			defer a.st.Close()
+
+			jobs, err := a.st.ListJobs(context.Background())
+			if err != nil {
+				return err
+			}
+			if asJSON {
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(jobs)
+			}
+			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 2, 2, ' ', 0)
+			fmt.Fprintln(tw, "ID\tKIND\tENABLED\tRUNS\tNEXT\tLAST STATUS")
+			for _, j := range jobs {
+				next := "-"
+				if j.Enabled {
+					lastFire := j.CreatedAt
+					if j.LastRunAt.Valid {
+						lastFire = j.LastRunAt.Time
+					}
+					if n, err := cronx.Next(j.Cron, j.Timezone, lastFire); err == nil {
+						next = n.Local().Format("2006-01-02 15:04")
+					}
+				}
+				status := j.LastStatus
+				if status == "" {
+					status = "never run"
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%v\t%d\t%s\t%s\n", j.ID, j.Kind, j.Enabled, j.RunCount, next, status)
+			}
+			return tw.Flush()
+		},
+	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print as JSON")
+	return cmd
+}
+
+func newShowCmd() *cobra.Command {
+	var asJSON bool
+	cmd := &cobra.Command{
+		Use:   "show <id>",
+		Short: "Show one job's detail and recent runs",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := openApp()
+			if err != nil {
+				return err
+			}
+			defer a.st.Close()
+
+			ctx := context.Background()
+			j, err := a.st.GetJob(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			runs, err := a.st.ListRuns(ctx, args[0], 5)
+			if err != nil {
+				return err
+			}
+			if asJSON {
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"job": j, "recent_runs": runs})
+			}
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "id:              %s\n", j.ID)
+			fmt.Fprintf(out, "kind:            %s\n", j.Kind)
+			fmt.Fprintf(out, "cron:            %s (%s)\n", j.Cron, j.Timezone)
+			fmt.Fprintf(out, "enabled:         %v\n", j.Enabled)
+			fmt.Fprintf(out, "cwd:             %s\n", j.Cwd)
+			if j.Kind == "cli" {
+				fmt.Fprintf(out, "cmd:             %s\n", j.Command)
+			} else {
+				fmt.Fprintf(out, "prompt:          %s\n", j.Prompt)
+				fmt.Fprintf(out, "model:           %s\n", j.Model)
+				fmt.Fprintf(out, "permission-mode: %s\n", j.PermissionMode)
+			}
+			fmt.Fprintf(out, "max-concurrent:  %d\n", j.MaxConcurrent)
+			fmt.Fprintf(out, "keep:            %d\n", j.Keep)
+			fmt.Fprintln(out, "recent runs:")
+			for _, r := range runs {
+				fmt.Fprintf(out, "  %s  %-8s %-16s %s\n", r.ID, r.Status, r.Trigger, r.StartedAt.Local().Format(time.RFC3339))
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print as JSON")
+	return cmd
+}
+
+func newRunsCmd() *cobra.Command {
+	var asJSON bool
+	var limit int
+	cmd := &cobra.Command{
+		Use:   "runs <id>",
+		Short: "List run history for one job",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := openApp()
+			if err != nil {
+				return err
+			}
+			defer a.st.Close()
+
+			runs, err := a.st.ListRuns(context.Background(), args[0], limit)
+			if err != nil {
+				return err
+			}
+			if asJSON {
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(runs)
+			}
+			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 2, 2, ' ', 0)
+			fmt.Fprintln(tw, "RUN ID\tSTATUS\tTRIGGER\tSTARTED\tEXIT")
+			for _, r := range runs {
+				exit := "-"
+				if r.ExitCode.Valid {
+					exit = fmt.Sprint(r.ExitCode.Int64)
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", r.ID, r.Status, r.Trigger, r.StartedAt.Local().Format(time.RFC3339), exit)
+			}
+			return tw.Flush()
+		},
+	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print as JSON")
+	cmd.Flags().IntVar(&limit, "limit", 200, "max runs to show")
+	return cmd
+}
+
+func newLogCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "log <run-id>",
+		Short: "Dump one run's log to stdout",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := openApp()
+			if err != nil {
+				return err
+			}
+			defer a.st.Close()
+
+			r, err := a.st.GetRun(context.Background(), args[0])
+			if err != nil {
+				return err
+			}
+			data, err := os.ReadFile(r.LogPath)
+			if err != nil {
+				return err
+			}
+			_, err = cmd.OutOrStdout().Write(data)
+			return err
+		},
+	}
+}
+
+func newEnableCmd(enable bool) *cobra.Command {
+	use, short := "enable <id>", "Enable a job"
+	if !enable {
+		use, short = "disable <id>", "Disable a job (pause without deleting)"
+	}
+	return &cobra.Command{
+		Use:   use,
+		Short: short,
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := openApp()
+			if err != nil {
+				return err
+			}
+			defer a.st.Close()
+			return a.st.SetEnabled(context.Background(), args[0], enable)
+		},
+	}
+}
+
+func newEditCmd() *cobra.Command {
+	var cronExpr, cwd, command, prompt, model, permMode, timezone string
+	var maxConcurrent, keep int
+	var timeoutSeconds int64
+	cmd := &cobra.Command{
+		Use:   "edit <id>",
+		Short: "Change one or more fields of an existing job",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if cronExpr != "" {
+				if err := cronx.Validate(cronExpr); err != nil {
+					return fmt.Errorf("invalid --cron: %w", err)
+				}
+			}
+			a, err := openApp()
+			if err != nil {
+				return err
+			}
+			defer a.st.Close()
+
+			p := store.JobPatch{}
+			setStr(&p.Cron, cmd, "cron", cronExpr)
+			setStr(&p.Timezone, cmd, "timezone", timezone)
+			setStr(&p.Cwd, cmd, "cwd", cwd)
+			setStr(&p.Command, cmd, "cmd", command)
+			setStr(&p.Prompt, cmd, "prompt", prompt)
+			setStr(&p.Model, cmd, "model", model)
+			setStr(&p.PermissionMode, cmd, "permission-mode", permMode)
+			if cmd.Flags().Changed("max-concurrent") {
+				p.MaxConcurrent = &maxConcurrent
+			}
+			if cmd.Flags().Changed("timeout-seconds") {
+				p.TimeoutSeconds = &timeoutSeconds
+			}
+			if cmd.Flags().Changed("keep") {
+				p.Keep = &keep
+			}
+			return a.st.EditJob(context.Background(), args[0], p)
+		},
+	}
+	cmd.Flags().StringVar(&cronExpr, "cron", "", "5-field cron expression")
+	cmd.Flags().StringVar(&cwd, "cwd", "", "working directory")
+	cmd.Flags().StringVar(&command, "cmd", "", "shell command (kind=cli)")
+	cmd.Flags().StringVar(&prompt, "prompt", "", "agent task prompt (kind=agent)")
+	cmd.Flags().StringVar(&model, "model", "", "model alias (kind=agent)")
+	cmd.Flags().StringVar(&permMode, "permission-mode", "", "permission mode (kind=agent)")
+	cmd.Flags().StringVar(&timezone, "timezone", "", `cron timezone`)
+	cmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 0, "max simultaneous runs")
+	cmd.Flags().Int64Var(&timeoutSeconds, "timeout-seconds", 0, "hard kill after N seconds")
+	cmd.Flags().IntVar(&keep, "keep", 0, "how many past runs to retain")
+	return cmd
+}
+
+func setStr(dst **string, cmd *cobra.Command, flag, val string) {
+	if cmd.Flags().Changed(flag) {
+		*dst = &val
+	}
+}
+
+func newRmCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "rm <id>",
+		Short: "Delete a job and its run history",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := openApp()
+			if err != nil {
+				return err
+			}
+			defer a.st.Close()
+			return a.st.DeleteJob(context.Background(), args[0])
+		},
+	}
+}
