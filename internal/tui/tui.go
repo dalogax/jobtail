@@ -64,14 +64,14 @@ type model struct {
 	statusMsg     string
 	running       map[string]bool // job IDs with an in-flight "run now" from the TUI
 
-	// jobsBoxWidth/runsBoxWidth are each pane's true rendered width
-	// (table content + border/padding chrome), set by layout(). Mouse
-	// hit-testing must use these, not a naive width/3: jobs and runs have
-	// different column counts, so their real widths differ from each
-	// other and from an even third (confirmed by measuring an actual
-	// rendered frame — boundaries landed at columns 67 and 131 on a
-	// 172-wide screen, not the 57/114 an even split would predict).
-	jobsBoxWidth, runsBoxWidth int
+	// jobsBoxWidth/runsBoxWidth/topBoxHeight are the true rendered
+	// dimensions set by layout() — jobs and runs side by side on top
+	// (split by jobsBoxWidth), log spanning the full width below (split
+	// by topBoxHeight). Mouse hit-testing must read these, not re-derive
+	// its own geometry: jobs and runs have different column counts, so
+	// their real widths differ from each other and from a naive even
+	// split (confirmed by measuring an actual rendered frame).
+	jobsBoxWidth, runsBoxWidth, topBoxHeight int
 }
 
 // Run opens the dashboard. It blocks until the user quits.
@@ -259,12 +259,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// layout target: jobs and runs side by side on top, log spanning the full
+// width underneath — the log is where the actual content is (command
+// output, agent transcripts), so it gets the width and gets it below
+// rather than squeezed into a third column.
 func (m *model) layout() {
 	if m.width == 0 {
 		return
 	}
-	third := m.width / 3
-	paneWidth := third - 4
+	half := m.width / 2
+	paneWidth := half - 4
 	if paneWidth < 10 {
 		paneWidth = 10
 	}
@@ -272,7 +276,9 @@ func (m *model) layout() {
 	// boxChrome: each pane's Border(NormalBorder) contributes 2 columns
 	// (left+right border) and its Padding(0,1) contributes 2 more
 	// (left+right padding) — 4 total, on top of the table's own content
-	// width. Getting this wrong is exactly what broke mouse hit-testing.
+	// width. Getting this wrong is exactly what broke mouse hit-testing
+	// once already; layout and hit-testing both read jobsBoxWidth/
+	// runsBoxWidth/topBoxHeight from here rather than re-deriving them.
 	const boxChrome = 4
 
 	jobCols := jobsColumns(paneWidth)
@@ -287,14 +293,40 @@ func (m *model) layout() {
 	m.runsTable.SetWidth(runsContentWidth)
 	m.runsBoxWidth = runsContentWidth + boxChrome
 
-	m.logVP.Width = m.width - m.jobsBoxWidth - m.runsBoxWidth - boxChrome
-	h := m.height - 6
-	if h < 3 {
-		h = 3
+	m.logVP.Width = m.width - boxChrome
+
+	// Vertical split: reserve 1 line for the help bar below everything,
+	// give the top row (jobs/runs — usually a short list) ~40% of what's
+	// left, and the log the rest.
+	totalH := m.height - 1
+	if totalH < 10 {
+		totalH = 10
 	}
-	m.jobsTable.SetHeight(h)
-	m.runsTable.SetHeight(h)
-	m.logVP.Height = h
+	topBoxOuter := totalH * 2 / 5
+	if topBoxOuter < 6 {
+		topBoxOuter = 6
+	}
+	logBoxOuter := totalH - topBoxOuter
+	if logBoxOuter < 5 {
+		logBoxOuter = 5
+	}
+	m.topBoxHeight = topBoxOuter
+
+	// Each box's own border(2)+title(1) = 3 lines of chrome above the
+	// table/viewport content proper.
+	const titleAndBorderChrome = 3
+	tableHeight := topBoxOuter - titleAndBorderChrome
+	if tableHeight < 3 {
+		tableHeight = 3
+	}
+	m.jobsTable.SetHeight(tableHeight)
+	m.runsTable.SetHeight(tableHeight)
+
+	logViewportHeight := logBoxOuter - titleAndBorderChrome
+	if logViewportHeight < 3 {
+		logViewportHeight = 3
+	}
+	m.logVP.Height = logViewportHeight
 }
 
 // columnsWidth sums what SetColumns just laid out, so the table's viewport
@@ -404,11 +436,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // a left-click, to a row within that pane's table.
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	pane := focusLog
-	switch {
-	case msg.X < m.jobsBoxWidth:
-		pane = focusJobs
-	case msg.X < m.jobsBoxWidth+m.runsBoxWidth:
-		pane = focusRuns
+	if msg.Y < m.topBoxHeight {
+		if msg.X < m.jobsBoxWidth {
+			pane = focusJobs
+		} else {
+			pane = focusRuns
+		}
 	}
 
 	switch msg.Button {
@@ -646,9 +679,10 @@ func (m model) View() string {
 	logBox := paneStyle(m.focus == focusLog).Render(
 		titleStyle.Render("Log: "+runID) + "\n" + m.logVP.View())
 
-	row := lipgloss.JoinHorizontal(lipgloss.Top, jobsBox, runsBox, logBox)
+	top := lipgloss.JoinHorizontal(lipgloss.Top, jobsBox, runsBox)
+	body := lipgloss.JoinVertical(lipgloss.Left, top, logBox)
 	help := helpStyle.Render("h/l or arrows/enter/esc: move · e: enable/disable · r: run now · q: quit  " + m.statusMsg)
-	return row + "\n" + help
+	return body + "\n" + help
 }
 
 func paneStyle(focused bool) lipgloss.Style {

@@ -205,9 +205,12 @@ func TestMouseClickSelectsRowAndSwitchesPane(t *testing.T) {
 		t.Fatalf("clicking in the runs pane's x-range should focus it, got %v", m.focus)
 	}
 
-	m = send(t, m, tea.MouseMsg{X: m.jobsBoxWidth + m.runsBoxWidth + 5, Y: 4, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	// Log spans the full width below jobs/runs now (not a third column to
+	// the right of them) — a click there needs Y past topBoxHeight, X is
+	// irrelevant.
+	m = send(t, m, tea.MouseMsg{X: 5, Y: m.topBoxHeight + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
 	if m.focus != focusLog {
-		t.Fatalf("clicking in the log pane's x-range should focus it, got %v", m.focus)
+		t.Fatalf("clicking below the top row should focus the log pane, got %v", m.focus)
 	}
 }
 
@@ -220,8 +223,9 @@ var ansiRE = regexp.MustCompile("\x1b\\[[0-9;]*[a-zA-Z]")
 // The two disagreed, so clicks landing in the visual gap between them
 // resolved to the wrong pane — invisible to every other test here because
 // none of them cross-checked hit-testing math against the rendered
-// output. This parses m.View() itself and asserts the border characters
-// really do sit at jobsBoxWidth / jobsBoxWidth+runsBoxWidth.
+// output. This parses m.View() itself and asserts the border/title
+// positions really do sit at jobsBoxWidth (horizontally, top row) and
+// topBoxHeight (vertically, where the log box begins).
 func TestMouseBoundariesMatchActualRenderedBorders(t *testing.T) {
 	st, logsDir := seedStore(t)
 	m := newModel(st, logsDir)
@@ -232,31 +236,38 @@ func TestMouseBoundariesMatchActualRenderedBorders(t *testing.T) {
 	if len(lines) < 2 {
 		t.Fatalf("view has too few lines: %d", len(lines))
 	}
-	line := []rune(ansiRE.ReplaceAllString(lines[1], "")) // title row: "Jobs ... Runs: ... Log: ..."
+	titleRow := []rune(ansiRE.ReplaceAllString(lines[1], "")) // "Jobs ... Runs: ..." (log is a separate row now)
 
 	borderCols := []int{}
-	for i, r := range line {
+	for i, r := range titleRow {
 		if r == '│' {
 			borderCols = append(borderCols, i)
 		}
 	}
-	// Expect 6: jobs' left edge, the adjacent pair where jobs' right
-	// border meets runs' left border, the adjacent pair where runs' right
-	// border meets log's left border, and log's own right edge.
-	if len(borderCols) != 6 {
-		t.Fatalf("expected 6 vertical border characters on the title row (left edge + 2 adjacent pairs + right edge), found %d: %q",
-			len(borderCols), string(line))
+	// Expect 4 on the top row now that log isn't beside it: jobs' left
+	// edge, the adjacent pair where jobs' right border meets runs' left
+	// border, and runs' own right edge.
+	if len(borderCols) != 4 {
+		t.Fatalf("expected 4 vertical border characters on the top row (left edge + adjacent pair + right edge), found %d: %q",
+			len(borderCols), string(titleRow))
 	}
-
-	// Allow off-by-one: a boundary can land on either half of an adjacent
-	// border pair depending on box-drawing specifics.
 	if d := abs(borderCols[1] - m.jobsBoxWidth); d > 1 {
 		t.Fatalf("jobs|runs border rendered at column %d, but jobsBoxWidth=%d (mouse clicks there would hit the wrong pane)",
 			borderCols[1], m.jobsBoxWidth)
 	}
-	if d := abs(borderCols[3] - (m.jobsBoxWidth + m.runsBoxWidth)); d > 1 {
-		t.Fatalf("runs|log border rendered at column %d, but jobsBoxWidth+runsBoxWidth=%d (mouse clicks there would hit the wrong pane)",
-			borderCols[3], m.jobsBoxWidth+m.runsBoxWidth)
+
+	// Row topBoxHeight is the log box's own top border; topBoxHeight+1 is
+	// its title line (same one-row offset the top boxes have at line 1).
+	if m.topBoxHeight+1 >= len(lines) {
+		t.Fatalf("topBoxHeight=%d is past the end of the rendered view (%d lines)", m.topBoxHeight, len(lines))
+	}
+	logBorderRow := ansiRE.ReplaceAllString(lines[m.topBoxHeight], "")
+	if !strings.ContainsAny(logBorderRow, "┌┬┐─") {
+		t.Fatalf("expected the log pane's top border at row topBoxHeight=%d, got: %q", m.topBoxHeight, logBorderRow)
+	}
+	logTitleRow := ansiRE.ReplaceAllString(lines[m.topBoxHeight+1], "")
+	if !strings.Contains(logTitleRow, "Log:") {
+		t.Fatalf("expected the log pane's title at row topBoxHeight+1=%d, got: %q", m.topBoxHeight+1, logTitleRow)
 	}
 }
 

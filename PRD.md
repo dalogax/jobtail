@@ -209,21 +209,25 @@ OpenCode itself moved off Go/Bubble Tea to **OpenTUI** — a Zig-compiled render
 
 Decision: **Bubble Tea**, because jobtail's UI is closer to `lazygit`/`k9s` (static-ish structured panes, not a live-rendered chat stream) and a single dependency-free binary matters for something a systemd timer and a Herdr tab both need to launch reliably. OpenTUI would be the right call if this were being built in TS/Bun already or needed OpenTUI's rendering headroom — revisit if either becomes true.
 
-Three-pane layout inside a Herdr tab (opened per §8 — either a plain `jobtail tui` in a manually-created tab, or via the optional plugin's keybinding), Bubble Tea (`charmbracelet/bubbletea` + `bubbles` table/viewport + `lipgloss`), pattern deliberately close to `lazygit`/`k9s` since that's already muscle memory here.
+Jobs and runs side by side on top, log spanning the full width underneath — not three columns side by side. Chosen over an even three-way split after actually using it: the log is where the real content lives (command output, agent transcripts), so it gets the width and gets it below the (usually short) job/run lists rather than squeezed into a third column. Herdr tab (opened per §8 — either a plain `jobtail tui` in a manually-created tab, or via the optional plugin's keybinding), Bubble Tea (`charmbracelet/bubbletea` + `bubbles` table/viewport + `lipgloss`), pattern deliberately close to `lazygit`/`k9s` since that's already muscle memory here.
 
 ```
-┌─ Jobs ──────────────────────┬─ Runs: nightly-deps ─────────┬─ Log: run 8f2a ─────────────┐
-│ ● nightly-deps    agent  47 │ ✓ 2026-09-26 03:00   1m12s   │ {"type":"assistant",...}     │
-│ ○ backup-check    cli   912 │ ✓ 2026-09-25 03:00   0m54s   │ {"type":"tool_use",...}      │
-│ ● cert-renew      cli     6 │ ✗ 2026-09-24 03:00   0m08s   │ {"type":"result","is_error"..│
-│                              │ ✓ 2026-09-23 03:00   1m30s   │                              │
-└──────────────────────────────┴───────────────────────────────┴──────────────────────────────┘
-  j/k move · enter drill in · esc back · e enable/disable · r run now · R resume (agent, failed run) · / filter · q close
+┌─ Jobs ────────────────────────────────┬─ Runs: nightly-deps ──────────────────┐
+│ ● nightly-deps    agent  47  ...  ✓   │ ✓ 2026-09-26 03:00   1m12s            │
+│ ○ backup-check    cli   912  ...  ✓   │ ✓ 2026-09-25 03:00   0m54s            │
+│ ● cert-renew      cli     6  ...  ✗   │ ✗ 2026-09-24 03:00   0m08s            │
+└────────────────────────────────────────┴────────────────────────────────────────┘
+┌─ Log: run 8f2a ──────────────────────────────────────────────────────────────────┐
+│ session abc123 started                                                           │
+│ > Bash({"command":"..."})                                                        │
+│ ...                                                                              │
+└────────────────────────────────────────────────────────────────────────────────┘
+  h/l or arrows/enter/esc: move · e enable/disable · r run now · q quit
 ```
 
-- **Left pane (jobs)**: `●`/`○` = enabled/disabled, type badge, run count. Row color = last status (green ok / red failed / yellow running / grey never-run).
-- **Middle pane (runs)**: for the selected job, newest first; status glyph, start time, duration, trigger badge (S/M for scheduled/manual).
-- **Right pane (log)**: for the selected run. `cli` jobs render the raw log as a scrolling text viewport. `agent` jobs parse the `stream-json` lines and render them the way a transcript reads — assistant text, tool calls with their input, tool results collapsed by default (expandable), final result/cost line — not raw JSON by default (raw available via a `J` toggle for debugging).
+- **Jobs pane** (top-left): `●`/`○` = enabled/disabled, type badge, run count. Row color = last status (green ok / red failed / yellow running / grey never-run).
+- **Runs pane** (top-right): for the selected job, newest first; status glyph, start time, duration, trigger badge (S/M for scheduled/manual).
+- **Log pane** (bottom, full width): for the selected run. `cli` jobs render the raw log as a scrolling text viewport. `agent` jobs parse the `stream-json` lines and render them the way a transcript reads — assistant text, tool calls with their input, tool results collapsed by default (expandable), final result/cost line — not raw JSON by default (raw available via a `J` toggle for debugging).
 - Live tail: if the selected run's `status='running'`, the log pane tails the file (`fsnotify`/poll) instead of a static read.
 - `e`/`r` act on the job/run under the cursor immediately via the same code path as the CLI (no separate "TUI-only" logic to keep in sync).
 - Refresh: poll SQLite every ~1s for list panes; this is a personal single-writer box, no need for push/subscribe.
