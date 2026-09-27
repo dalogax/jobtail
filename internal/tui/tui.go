@@ -643,14 +643,33 @@ const (
 // overflowed. Returns the true rendered box width.
 // Both setters re-render the table through UpdateViewport, so neither is
 // called with a value the table already has.
-func setTableWidth(t *table.Model, boxWidth int, cols func(int) []table.Column) (int, []table.Column) {
+//
+// Columns and rows are swapped together, through an empty row set, because
+// bubbles/table indexes its column slice by the row's cell position
+// (renderRow: `for i := range m.rows[r] { m.cols[i] ... }`) and *both*
+// setters re-render immediately. A table left holding six-cell rows against
+// a five-column set therefore panics inside the setter itself, before
+// anything gets the chance to rebuild the rows.
+//
+// That is not hypothetical: shrinking a terminal far enough to drop a
+// column did it every time — "index out of range [5] with length 5", which
+// Bubble Tea catches, prints with a stack trace, and exits on, so the whole
+// dashboard vanishes mid-session. Building rows from the column set
+// (cellsFor) made them consistent at any one size; it did not make the
+// transition between two sizes safe.
+func setTableWidth(t *table.Model, boxWidth int, cols func(int) []table.Column,
+	rows func([]table.Column) []table.Row) (int, []table.Column) {
 	content := boxWidth - boxChromeX
 	if content < 1 {
 		content = 1
 	}
 	c := cols(content)
 	if !slices.Equal(t.Columns(), c) {
+		cursor := t.Cursor()
+		t.SetRows(nil) // no rows, so the column swap has nothing to mis-index
 		t.SetColumns(c)
+		t.SetRows(rows(c))
+		t.SetCursor(cursor) // SetRows(nil) drops the selection; put it back
 	}
 	w := columnsWidth(c)
 	if t.Width() != w {
@@ -688,8 +707,8 @@ func (m *model) layout() {
 		if half := m.width / 2; runsW > half {
 			runsW = half
 		}
-		m.runsBoxWidth, runCols = setTableWidth(&m.runsTable, runsW, runsColumns)
-		m.jobsBoxWidth, jobCols = setTableWidth(&m.jobsTable, m.width-m.runsBoxWidth, jobsColumns)
+		m.runsBoxWidth, runCols = setTableWidth(&m.runsTable, runsW, runsColumns, m.runRowsFor)
+		m.jobsBoxWidth, jobCols = setTableWidth(&m.jobsTable, m.width-m.runsBoxWidth, jobsColumns, m.jobRowsFor)
 		m.logVP.Width = m.width - boxChromeX
 
 		topBoxOuter := m.topRowHeight(avail)
@@ -700,8 +719,8 @@ func (m *model) layout() {
 		m.logVP.Height = viewportHeight(avail - topBoxOuter)
 
 	case layoutStacked:
-		m.jobsBoxWidth, jobCols = setTableWidth(&m.jobsTable, m.width, jobsColumns)
-		m.runsBoxWidth, runCols = setTableWidth(&m.runsTable, m.width, runsColumns)
+		m.jobsBoxWidth, jobCols = setTableWidth(&m.jobsTable, m.width, jobsColumns, m.jobRowsFor)
+		m.runsBoxWidth, runCols = setTableWidth(&m.runsTable, m.width, runsColumns, m.runRowsFor)
 		m.logVP.Width = m.width - boxChromeX
 
 		jobsH, runsH, logH := m.stackedHeights(avail)
@@ -712,8 +731,8 @@ func (m *model) layout() {
 		m.logVP.Height = viewportHeight(logH)
 
 	case layoutFocused:
-		m.jobsBoxWidth, jobCols = setTableWidth(&m.jobsTable, m.width, jobsColumns)
-		m.runsBoxWidth, runCols = setTableWidth(&m.runsTable, m.width, runsColumns)
+		m.jobsBoxWidth, jobCols = setTableWidth(&m.jobsTable, m.width, jobsColumns, m.jobRowsFor)
+		m.runsBoxWidth, runCols = setTableWidth(&m.runsTable, m.width, runsColumns, m.runRowsFor)
 		m.logVP.Width = m.width - boxChromeX
 
 		// The one visible pane owns every row that isn't the help bar.
@@ -723,16 +742,9 @@ func (m *model) layout() {
 		m.logVP.Height = viewportHeight(avail)
 	}
 
-	// If the column set changed, the rows must be rebuilt against it: they
-	// need one cell per surviving column, and whether the status cell may
-	// carry color depends on the width that column landed at. If it didn't,
-	// the rows the caller already installed are still correct.
-	if !slices.Equal(m.jobsCols, jobCols) {
-		m.jobsTable.SetRows(jobRows(m.jobs, jobCols))
-	}
-	if !slices.Equal(m.runsCols, runCols) {
-		m.runsTable.SetRows(runRows(m.runs, runCols))
-	}
+	// Rows were rebuilt against these columns inside setTableWidth, which
+	// has to do it there rather than here: the two cannot be out of step
+	// even momentarily.
 	m.jobsCols, m.runsCols = jobCols, runCols
 
 	// The log is wrapped to the pane width, so a resize has to re-wrap it.
@@ -1893,3 +1905,9 @@ func wrapForViewport(content string, width int) string {
 	}
 	return cellbuf.Wrap(content, width, "")
 }
+
+// jobRowsFor and runRowsFor build each table's rows against a given column
+// set. They exist as methods so setTableWidth can rebuild rows at the exact
+// moment it swaps columns, without knowing where the data lives.
+func (m *model) jobRowsFor(cols []table.Column) []table.Row { return jobRows(m.jobs, cols) }
+func (m *model) runRowsFor(cols []table.Column) []table.Row { return runRows(m.runs, cols) }

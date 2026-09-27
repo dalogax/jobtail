@@ -347,3 +347,75 @@ func TestEveryPaneTitleSurvivesNarrowTerminals(t *testing.T) {
 		}
 	}
 }
+
+// TestResizingAPopulatedDashboardNeverPanics is the regression test for a
+// crash that took the whole program down mid-session: shrinking the terminal
+// far enough to drop a table column panicked inside bubbles/table with
+// "index out of range [5] with length 5", and Bubble Tea's recover printed a
+// stack trace over the user's terminal and exited.
+//
+// Every earlier size test built a *fresh* model per size, so none of them
+// ever resized a dashboard that already had rows in it — which is the only
+// way to reach the bad state, where the table holds rows built for the old
+// column set while the new one is being installed.
+func TestResizingAPopulatedDashboardNeverPanics(t *testing.T) {
+	st, logsDir := seedStore(t)
+	addJobs(t, st, "worker", 6)
+
+	sizes := []struct{ w, h int }{
+		{172, 40}, {60, 20}, // wide -> narrow: drops columns
+		{60, 20}, {172, 40}, // narrow -> wide: adds them back
+		{120, 30}, {46, 22}, {200, 50}, {30, 16}, {80, 24}, {24, 14},
+		{172, 40}, {100, 30}, {99, 29}, {56, 20}, {55, 19},
+	}
+
+	// One model, resized repeatedly — the point is the transitions.
+	m := modelAt(t, st, logsDir, sizes[0].w, sizes[0].h)
+	m = send(t, m, special(tea.KeyEnter)) // into runs, so both tables carry rows
+	for _, s := range sizes {
+		m = send(t, m, tea.WindowSizeMsg{Width: s.w, Height: s.h})
+		frame := m.View() // renders both tables against the new columns
+		if frame == "" {
+			t.Fatalf("empty frame at %dx%d", s.w, s.h)
+		}
+		// Rows and columns must agree after every resize, or the next
+		// render is the one that panics.
+		for _, tbl := range []struct {
+			name string
+			cols []table.Column
+			rows []table.Row
+		}{
+			{"jobs", m.jobsCols, m.jobsTable.Rows()},
+			{"runs", m.runsCols, m.runsTable.Rows()},
+		} {
+			for i, row := range tbl.rows {
+				if len(row) != len(tbl.cols) {
+					t.Fatalf("at %dx%d the %s table has %d columns but row %d has %d cells",
+						s.w, s.h, tbl.name, len(tbl.cols), i, len(row))
+				}
+			}
+		}
+	}
+}
+
+// Resizing must not silently move the selection, which is what naively
+// clearing the rows to swap columns would do.
+func TestResizingKeepsTheSelectedJob(t *testing.T) {
+	st, logsDir := seedStore(t)
+	addJobs(t, st, "worker", 6)
+
+	m := modelAt(t, st, logsDir, 172, 40)
+	m = send(t, m, special(tea.KeyDown))
+	m = send(t, m, special(tea.KeyDown))
+	want := m.selectedJobID()
+	if want == "" {
+		t.Fatal("expected a selected job to start with")
+	}
+
+	for _, s := range []struct{ w, h int }{{60, 20}, {172, 40}, {46, 22}, {120, 30}} {
+		m = send(t, m, tea.WindowSizeMsg{Width: s.w, Height: s.h})
+		if got := m.selectedJobID(); got != want {
+			t.Errorf("resizing to %dx%d moved the selection from %q to %q", s.w, s.h, want, got)
+		}
+	}
+}
