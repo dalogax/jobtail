@@ -375,18 +375,18 @@ func (s *Store) DeleteJob(ctx context.Context, id string) ([]string, error) {
 // EditJob applies a sparse patch: zero-value fields in patch are left unchanged
 // except where the corresponding *Set flag is true.
 type JobPatch struct {
-	Cron           *string
-	Timezone       *string
-	Cwd            *string
-	Command        *string
-	Prompt         *string
-	Model          *string
-	Provider       *string
-	PermissionMode *string
-	MaxConcurrent  *int
-	TimeoutSeconds *int64
-	Keep           *int
-	Precheck       *string
+	Cron                   *string
+	Timezone               *string
+	Cwd                    *string
+	Command                *string
+	Prompt                 *string
+	Model                  *string
+	Provider               *string
+	PermissionMode         *string
+	MaxConcurrent          *int
+	TimeoutSeconds         *int64
+	Keep                   *int
+	Precheck               *string
 	PrecheckTimeoutSeconds *int64
 }
 
