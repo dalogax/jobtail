@@ -21,7 +21,7 @@
 - **`cli`** — a plain shell command (a health check, a backup script, a cleanup task).
 - **`agent`** — a headless turn from [Claude Code](https://claude.com/claude-code), [opencode](https://opencode.ai), or [Codex](https://github.com/openai/codex): a prompt, a working directory, a model, and `--provider` to pick which CLI runs it (default `claude`). The full transcript is captured and rendered as a readable log, not raw JSON — the parser is provider-aware, so this works the same regardless of which agent CLI a job uses.
 
-A `systemd --user` timer checks for due jobs once a minute; each due job runs as its own process and writes its own log file. Everything — job definitions, run history, status — lives in one SQLite database. There's no daemon of jobtail's own to keep alive, and nothing tying it to any particular terminal, multiplexer, or session.
+A per-user timer — `systemd --user` on Linux, a LaunchAgent on macOS — checks for due jobs once a minute; each due job runs as its own process and writes its own log file. Everything — job definitions, run history, status — lives in one SQLite database. There's no daemon of jobtail's own to keep alive, and nothing tying it to any particular terminal, multiplexer, or session.
 
 ```
 jobtail add backup-check --kind cli --cron "*/15 * * * *" \
@@ -67,8 +67,21 @@ Downloads the right release binary for your OS/arch (Linux and macOS, amd64/arm6
 Then wire up the scheduler:
 
 ```sh
-jobtail install-systemd --enable
+jobtail install-scheduler --enable
 ```
+
+That writes the per-user timer your platform uses — `systemd --user` units on Linux, a LaunchAgent on macOS — and starts it. jobtail has no daemon of its own: the timer just runs `jobtail tick` once a minute, and `tick` starts whatever is due.
+
+<details>
+<summary>On macOS, two details worth knowing</summary>
+
+A LaunchAgent starts with almost no environment: its `PATH` is just `/usr/bin:/bin:/usr/sbin:/sbin`, which has neither Homebrew nor `~/.local/bin` on it — so `claude`, `opencode`, `codex` and most of what a `cli` job shells out to would simply not resolve. `install-scheduler` therefore records your current `PATH` (plus the usual Homebrew locations) in the agent. **Re-run it after installing a tool somewhere new**, and after moving the `jobtail` binary. Same goes for `JOBTAIL_DATA_DIR`, if you set one.
+
+Scheduled jobs run without a UI, so anything touching Desktop, Documents, or Downloads can hit a macOS privacy prompt that nothing is there to answer, and the job just fails. If that happens, grant Full Disk Access to the `jobtail` binary in System Settings → Privacy & Security.
+
+To check on it: `launchctl print gui/$(id -u)/com.github.dalogax.jobtail.tick`. The timer's own output goes to `~/.local/share/jobtail/scheduler.log`.
+
+</details>
 
 `jobtail upgrade` checks for and installs newer releases later; every other command also prints a one-line heads-up on stderr when one's available, so you don't have to remember to check.
 
@@ -115,6 +128,7 @@ jobtail enable/disable <id>  Pause or resume a job without deleting it
 jobtail edit <id>           Change one or more fields of an existing job
 jobtail rm <id>             Delete a job and its run history
 jobtail gc                 Prune old runs (and their logs) past retention
+jobtail install-scheduler  Install the per-user timer that runs due jobs
 jobtail upgrade            Check for and install a newer release
 jobtail                    Open the dashboard (same as `jobtail tui`)
 ```

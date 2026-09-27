@@ -112,7 +112,7 @@ func main() {
 		newRunExecCmd(),
 		newGCCmd(),
 		newTUICmd(),
-		newInstallSystemdCmd(),
+		newInstallSchedulerCmd(),
 		newUpgradeCmd(),
 	)
 

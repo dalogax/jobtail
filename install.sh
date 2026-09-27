@@ -49,7 +49,7 @@ main() {
     *":$INSTALL_DIR:"*) ;;
     *) add_to_path ;;
   esac
-  echo "jobtail: next, run: jobtail install-systemd --enable" >&2
+  echo "jobtail: next, run: jobtail install-scheduler --enable" >&2
 }
 
 # add_to_path appends INSTALL_DIR to the current shell's profile, once, so
