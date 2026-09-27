@@ -488,6 +488,8 @@ There is no version file to bump, and nothing to forget: the next version is der
 | `[major]` | `v0.1.17` → `v1.0.0` |
 | `[skip release]` | no release at all |
 
+Markers are read from the **first line only** — for a squash merge, the PR title. Scanning the whole message means any commit that merely *discusses* a marker trips it, which is not hypothetical: the commit that introduced this workflow described all three in its body, and the first live run skipped itself on the `[skip release]` in its own prose. Had the skip not fired first, the same scan would have read `[major]` out of that sentence and cut a v1.0.0. A marker has to be a deliberate, visible act, not a substring.
+
 `workflow_dispatch` takes an explicit `patch`/`minor`/`major` and wins over any marker; pushing a tag by hand still releases exactly that version, so the manual path is intact.
 
 Conventional-commit parsing was the obvious alternative and was rejected: this repo's history is written in prose sentences ("Make the dashboard fit any terminal…"), and adopting `feat:`/`fix:` prefixes would mean changing how every commit is written to serve the tooling rather than the reader.
