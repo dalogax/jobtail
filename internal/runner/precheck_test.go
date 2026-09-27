@@ -86,10 +86,10 @@ func TestPrecheckPassInjectsContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-// The stub agent exits 0 without emitting stream-json events, so the
-// runner classifies the run as failed — that is expected and irrelevant
-// here; this test only asserts the precheck context reached the prompt
-// and the log records the pass.
+	// The stub agent exits 0 without emitting stream-json events, so the
+	// runner classifies the run as failed — that is expected and irrelevant
+	// here; this test only asserts the precheck context reached the prompt
+	// and the log records the pass.
 	if res.Status == "skipped" || res.ExitCode == 1 {
 		t.Fatalf("gate passed but run was skipped: %+v", res)
 	}
