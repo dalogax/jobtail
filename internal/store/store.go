@@ -69,6 +69,19 @@ func additiveMigrations(db *sql.DB) error {
 	if err := addColumnIfMissing(db, "jobs", "provider", "TEXT"); err != nil {
 		return err
 	}
+	// precheck is an optional shell gate run before a job's real execution
+	// (agent jobs mostly): exit 0 lets the job run (its stdout is appended
+	// to the agent prompt as pending-item context), exit 1 marks the run
+	// "skipped" without executing the job, exit >=2 marks it "failed".
+	// empty/NULL means "no precheck", so existing jobs keep their behavior.
+	if err := addColumnIfMissing(db, "jobs", "precheck", "TEXT"); err != nil {
+		return err
+	}
+	// precheck_timeout_seconds bounds the gate itself; empty/NULL means
+	// "no timeout", mirroring timeout_seconds.
+	if err := addColumnIfMissing(db, "jobs", "precheck_timeout_seconds", "INTEGER"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -122,8 +135,13 @@ type Job struct {
 	MaxConcurrent  int
 	TimeoutSeconds int64 // 0 = no timeout
 	Keep           int
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	// Precheck is an optional shell gate (run like Command, via sh -c in
+	// Cwd) evaluated before the job's real execution. "" = no precheck.
+	Precheck string
+	// PrecheckTimeoutSeconds bounds the precheck itself; 0 = no timeout.
+	PrecheckTimeoutSeconds int64
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
 }
 
 type Run struct {
@@ -192,19 +210,22 @@ func (s *Store) CreateJob(ctx context.Context, j Job) error {
 	now := timeToStr(time.Now())
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO jobs (id, kind, cron, timezone, enabled, cwd, command, prompt, model, provider,
-			permission_mode, max_concurrent, timeout_seconds, keep, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			permission_mode, max_concurrent, timeout_seconds, keep, precheck, precheck_timeout_seconds,
+			created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		j.ID, j.Kind, j.Cron, j.Timezone, boolToInt(j.Enabled), j.Cwd,
 		nullableStr(j.Command), nullableStr(j.Prompt), nullableStr(j.Model), nullableStr(j.Provider),
 		nullableStr(j.PermissionMode),
-		j.MaxConcurrent, nullableInt(j.TimeoutSeconds), j.Keep, now, now)
+		j.MaxConcurrent, nullableInt(j.TimeoutSeconds), j.Keep,
+		nullableStr(j.Precheck), nullableInt(j.PrecheckTimeoutSeconds), now, now)
 	return err
 }
 
 func (s *Store) GetJob(ctx context.Context, id string) (Job, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, kind, cron, timezone, enabled, cwd, command, prompt, model, provider,
-		       permission_mode, max_concurrent, timeout_seconds, keep, created_at, updated_at
+		       permission_mode, max_concurrent, timeout_seconds, keep,
+		       precheck, precheck_timeout_seconds, created_at, updated_at
 		FROM jobs WHERE id = ?`, id)
 	return scanJob(row)
 }
@@ -212,11 +233,12 @@ func (s *Store) GetJob(ctx context.Context, id string) (Job, error) {
 func scanJob(row *sql.Row) (Job, error) {
 	var j Job
 	var enabled int
-	var command, prompt, model, provider, permMode sql.NullString
-	var timeoutSeconds sql.NullInt64
+	var command, prompt, model, provider, permMode, precheck sql.NullString
+	var timeoutSeconds, precheckTimeout sql.NullInt64
 	var createdAt, updatedAt string
 	err := row.Scan(&j.ID, &j.Kind, &j.Cron, &j.Timezone, &enabled, &j.Cwd, &command, &prompt, &model, &provider,
-		&permMode, &j.MaxConcurrent, &timeoutSeconds, &j.Keep, &createdAt, &updatedAt)
+		&permMode, &j.MaxConcurrent, &timeoutSeconds, &j.Keep,
+		&precheck, &precheckTimeout, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Job{}, ErrNotFound
 	}
@@ -230,6 +252,8 @@ func scanJob(row *sql.Row) (Job, error) {
 	j.Provider = provider.String
 	j.PermissionMode = permMode.String
 	j.TimeoutSeconds = timeoutSeconds.Int64
+	j.Precheck = precheck.String
+	j.PrecheckTimeoutSeconds = precheckTimeout.Int64
 	j.CreatedAt, err = strToTime(createdAt)
 	if err != nil {
 		return Job{}, err
@@ -252,8 +276,9 @@ func scanJob(row *sql.Row) (Job, error) {
 // "fix" this without measuring it.
 func (s *Store) ListJobs(ctx context.Context) ([]JobSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT j.id, j.kind, j.cron, j.timezone, j.enabled, j.cwd, j.command, j.prompt, j.model, j.provider,
-		       j.permission_mode, j.max_concurrent, j.timeout_seconds, j.keep, j.created_at, j.updated_at,
+		SELECT j.id, j.kind, j.cron, j.timezone, j.enabled, j.cwd, j.command, j.prompt, j.provider, j.model,
+		       j.permission_mode, j.max_concurrent, j.timeout_seconds, j.keep, j.precheck, j.precheck_timeout_seconds,
+		       j.created_at, j.updated_at,
 		       (SELECT COUNT(*) FROM runs r WHERE r.job_id = j.id) AS run_count,
 		       (SELECT r2.status FROM runs r2 WHERE r2.job_id = j.id ORDER BY r2.started_at DESC LIMIT 1) AS last_status,
 		       (SELECT r3.started_at FROM runs r3 WHERE r3.job_id = j.id ORDER BY r3.started_at DESC LIMIT 1) AS last_run_at
@@ -267,11 +292,12 @@ func (s *Store) ListJobs(ctx context.Context) ([]JobSummary, error) {
 	for rows.Next() {
 		var js JobSummary
 		var enabled int
-		var command, prompt, model, provider, permMode, lastStatus, lastRunAt sql.NullString
-		var timeoutSeconds sql.NullInt64
+		var command, prompt, model, provider, permMode, precheck, lastStatus, lastRunAt sql.NullString
+		var timeoutSeconds, precheckTimeout sql.NullInt64
 		var createdAt, updatedAt string
-		if err := rows.Scan(&js.ID, &js.Kind, &js.Cron, &js.Timezone, &enabled, &js.Cwd, &command, &prompt, &model, &provider,
-			&permMode, &js.MaxConcurrent, &timeoutSeconds, &js.Keep, &createdAt, &updatedAt,
+		if err := rows.Scan(&js.ID, &js.Kind, &js.Cron, &js.Timezone, &enabled, &js.Cwd, &command, &prompt, &provider, &model,
+			&permMode, &js.MaxConcurrent, &timeoutSeconds, &js.Keep, &precheck, &precheckTimeout,
+			&createdAt, &updatedAt,
 			&js.RunCount, &lastStatus, &lastRunAt); err != nil {
 			return nil, err
 		}
@@ -282,6 +308,8 @@ func (s *Store) ListJobs(ctx context.Context) ([]JobSummary, error) {
 		js.Provider = provider.String
 		js.PermissionMode = permMode.String
 		js.TimeoutSeconds = timeoutSeconds.Int64
+		js.Precheck = precheck.String
+		js.PrecheckTimeoutSeconds = precheckTimeout.Int64
 		js.LastStatus = lastStatus.String
 		if js.CreatedAt, err = strToTime(createdAt); err != nil {
 			return nil, err
@@ -358,6 +386,8 @@ type JobPatch struct {
 	MaxConcurrent  *int
 	TimeoutSeconds *int64
 	Keep           *int
+	Precheck       *string
+	PrecheckTimeoutSeconds *int64
 }
 
 func (s *Store) EditJob(ctx context.Context, id string, p JobPatch) error {
@@ -398,12 +428,19 @@ func (s *Store) EditJob(ctx context.Context, id string, p JobPatch) error {
 	if p.Keep != nil {
 		j.Keep = *p.Keep
 	}
+	if p.Precheck != nil {
+		j.Precheck = *p.Precheck
+	}
+	if p.PrecheckTimeoutSeconds != nil {
+		j.PrecheckTimeoutSeconds = *p.PrecheckTimeoutSeconds
+	}
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE jobs SET cron=?, timezone=?, cwd=?, command=?, prompt=?, model=?, provider=?, permission_mode=?,
-			max_concurrent=?, timeout_seconds=?, keep=?, updated_at=?
+			max_concurrent=?, timeout_seconds=?, keep=?, precheck=?, precheck_timeout_seconds=?, updated_at=?
 		WHERE id=?`,
 		j.Cron, j.Timezone, j.Cwd, nullableStr(j.Command), nullableStr(j.Prompt), nullableStr(j.Model),
 		nullableStr(j.Provider), nullableStr(j.PermissionMode), j.MaxConcurrent, nullableInt(j.TimeoutSeconds), j.Keep,
+		nullableStr(j.Precheck), nullableInt(j.PrecheckTimeoutSeconds),
 		timeToStr(time.Now()), id)
 	return err
 }
@@ -459,7 +496,8 @@ func (s *Store) StartRun(ctx context.Context, jobID, runID, trigger, logPath str
 func (s *Store) getJobTx(ctx context.Context, tx *sql.Tx, id string) (Job, error) {
 	row := tx.QueryRowContext(ctx, `
 		SELECT id, kind, cron, timezone, enabled, cwd, command, prompt, model, provider,
-		       permission_mode, max_concurrent, timeout_seconds, keep, created_at, updated_at
+		       permission_mode, max_concurrent, timeout_seconds, keep,
+		       precheck, precheck_timeout_seconds, created_at, updated_at
 		FROM jobs WHERE id = ?`, id)
 	return scanJob(row)
 }

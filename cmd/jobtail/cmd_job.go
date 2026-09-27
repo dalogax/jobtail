@@ -92,9 +92,9 @@ func resolveCwd(cwd string) (string, error) {
 }
 
 func newAddCmd() *cobra.Command {
-	var kind, cronExpr, cwd, command, prompt, model, provider, permMode, timezone string
+	var kind, cronExpr, cwd, command, prompt, model, provider, permMode, timezone, precheck string
 	var maxConcurrent, keep int
-	var timeoutSeconds int64
+	var timeoutSeconds, precheckTimeoutSeconds int64
 
 	cmd := &cobra.Command{
 		Use:   "add <id>",
@@ -145,6 +145,7 @@ func newAddCmd() *cobra.Command {
 				ID: id, Kind: kind, Cron: cronExpr, Timezone: timezone, Enabled: true,
 				Cwd: cwd, Command: command, Prompt: prompt, Model: model, Provider: provider, PermissionMode: permMode,
 				MaxConcurrent: maxConcurrent, TimeoutSeconds: timeoutSeconds, Keep: keep,
+				Precheck: precheck, PrecheckTimeoutSeconds: precheckTimeoutSeconds,
 			}
 			if err := a.st.CreateJob(context.Background(), j); err != nil {
 				return err
@@ -167,6 +168,8 @@ func newAddCmd() *cobra.Command {
 	cmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 1, "max simultaneous runs of this job")
 	cmd.Flags().Int64Var(&timeoutSeconds, "timeout-seconds", 0, "hard kill after N seconds (0 = no timeout)")
 	cmd.Flags().IntVar(&keep, "keep", 200, "how many past runs to retain")
+	cmd.Flags().StringVar(&precheck, "precheck", "", "shell gate run before execution: exit 0 runs the job (stdout becomes PENDING ITEMS context for agent prompts), exit 1 marks the run skipped, exit >=2 fails it (agent jobs mainly)")
+	cmd.Flags().Int64Var(&precheckTimeoutSeconds, "precheck-timeout-seconds", 0, "hard kill the precheck after N seconds (0 = no timeout)")
 	return cmd
 }
 
@@ -254,6 +257,10 @@ func newShowCmd() *cobra.Command {
 				fmt.Fprintf(out, "provider:        %s\n", providerLabel(j.Provider))
 				fmt.Fprintf(out, "model:           %s\n", j.Model)
 				fmt.Fprintf(out, "permission-mode: %s\n", j.PermissionMode)
+			}
+			if j.Precheck != "" {
+				fmt.Fprintf(out, "precheck:        %s\n", j.Precheck)
+				fmt.Fprintf(out, "precheck-timeout: %ds\n", j.PrecheckTimeoutSeconds)
 			}
 			fmt.Fprintf(out, "max-concurrent:  %d\n", j.MaxConcurrent)
 			fmt.Fprintf(out, "keep:            %d\n", j.Keep)
@@ -353,9 +360,9 @@ func newEnableCmd(enable bool) *cobra.Command {
 }
 
 func newEditCmd() *cobra.Command {
-	var cronExpr, cwd, command, prompt, model, provider, permMode, timezone string
+	var cronExpr, cwd, command, prompt, model, provider, permMode, timezone, precheck string
 	var maxConcurrent, keep int
-	var timeoutSeconds int64
+	var timeoutSeconds, precheckTimeoutSeconds int64
 	cmd := &cobra.Command{
 		Use:   "edit <id>",
 		Short: "Change one or more fields of an existing job",
@@ -407,6 +414,10 @@ func newEditCmd() *cobra.Command {
 			if cmd.Flags().Changed("keep") {
 				p.Keep = &keep
 			}
+			setStr(&p.Precheck, cmd, "precheck", precheck)
+			if cmd.Flags().Changed("precheck-timeout-seconds") {
+				p.PrecheckTimeoutSeconds = &precheckTimeoutSeconds
+			}
 			return a.st.EditJob(context.Background(), args[0], p)
 		},
 	}
@@ -421,6 +432,8 @@ func newEditCmd() *cobra.Command {
 	cmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 0, "max simultaneous runs")
 	cmd.Flags().Int64Var(&timeoutSeconds, "timeout-seconds", 0, "hard kill after N seconds")
 	cmd.Flags().IntVar(&keep, "keep", 0, "how many past runs to retain")
+	cmd.Flags().StringVar(&precheck, "precheck", "", "shell gate run before execution (empty string clears it)")
+	cmd.Flags().Int64Var(&precheckTimeoutSeconds, "precheck-timeout-seconds", 0, "hard kill the precheck after N seconds")
 	return cmd
 }
 

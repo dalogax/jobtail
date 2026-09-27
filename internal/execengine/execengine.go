@@ -4,9 +4,11 @@ package execengine
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
@@ -102,7 +104,7 @@ func RunCLI(ctx context.Context, j store.Job, logPath string) (Result, error) {
 	ctx, cancel := withJobTimeout(ctx, j)
 	defer cancel()
 
-	f, err := os.Create(logPath)
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return Result{}, err
 	}
@@ -118,6 +120,61 @@ func RunCLI(ctx context.Context, j store.Job, logPath string) (Result, error) {
 
 	err = cmd.Run()
 	return classifyExit(ctx, cmd, err, start)
+}
+
+// PrecheckResult is the outcome of a job's optional precheck gate: rc 0
+// means "proceed" (with Output available as pending-item context), rc 1
+// means "nothing to do" (skip the job), rc >=2 or an execution error means
+// the gate itself failed (fail the run).
+type PrecheckResult struct {
+	ExitCode int
+	Output   string // combined stdout+stderr, capped at LogCapBytes
+	Err      error  // non-nil if the gate could not be executed at all
+	TimedOut bool
+}
+
+// RunPrecheck executes j.Precheck via `sh -c` in j.Cwd, bounded by
+// precheckTimeout when > 0, and returns its exit code and captured output.
+// The output is intended both for the run log (so the dashboard shows what
+// the gate saw) and as prompt context for agent jobs on a pass.
+func RunPrecheck(ctx context.Context, j store.Job) PrecheckResult {
+	if j.Precheck == "" {
+		return PrecheckResult{ExitCode: 0}
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if j.PrecheckTimeoutSeconds > 0 {
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(j.PrecheckTimeoutSeconds)*time.Second)
+		defer cancel()
+	}
+
+	var buf bytes.Buffer
+	cmd := exec.CommandContext(ctx, "sh", "-c", j.Precheck)
+	cmd.Dir = j.Cwd
+	cmd.Env = childEnv()
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	// The gate is advisory context, not a program under our control: a
+	// failing gate should yield "precheck failed", not a Go panic.
+	cmd.Cancel = func() error { return context.Cause(ctx) }
+
+	err := cmd.Run()
+	out := buf.String()
+	if len(out) > LogCapBytes {
+		out = out[:LogCapBytes] + "\n... [jobtail: precheck output truncated]"
+	}
+
+	if ctx.Err() != nil && (errors.Is(ctx.Err(), context.DeadlineExceeded)) {
+		return PrecheckResult{ExitCode: 2, Output: out, Err: fmt.Errorf("precheck timed out after %ds", j.PrecheckTimeoutSeconds), TimedOut: true}
+	}
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return PrecheckResult{ExitCode: exitErr.ExitCode(), Output: out}
+		}
+		return PrecheckResult{ExitCode: 2, Output: out, Err: err}
+	}
+	return PrecheckResult{ExitCode: 0, Output: out}
 }
 
 // RunAgent runs one headless agent-CLI turn in job.Cwd, dispatching on
@@ -144,7 +201,7 @@ func runClaudeAgent(ctx context.Context, j store.Job, logPath string, onSessionI
 	ctx, cancel := withJobTimeout(ctx, j)
 	defer cancel()
 
-	f, err := os.Create(logPath)
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return Result{}, err
 	}
@@ -244,7 +301,7 @@ func runOpenCodeAgent(ctx context.Context, j store.Job, logPath string, onSessio
 	ctx, cancel := withJobTimeout(ctx, j)
 	defer cancel()
 
-	f, err := os.Create(logPath)
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return Result{}, err
 	}
@@ -333,7 +390,7 @@ func runCodexAgent(ctx context.Context, j store.Job, logPath string, onSessionID
 	ctx, cancel := withJobTimeout(ctx, j)
 	defer cancel()
 
-	f, err := os.Create(logPath)
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return Result{}, err
 	}
