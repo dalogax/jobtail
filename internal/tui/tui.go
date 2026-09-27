@@ -1436,9 +1436,9 @@ func statusStyle(s string) lipgloss.Style {
 		return statusFailed
 	case "running":
 		return statusRunning
-	case "skipped":
-		return statusNever
 	default:
+		// Includes "skipped" and "skipped_overlap": nothing ran, so the
+		// row should read as inert rather than as a result.
 		return statusNever
 	}
 }

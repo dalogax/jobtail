@@ -131,6 +131,10 @@ type PrecheckResult struct {
 	Output   string // combined stdout+stderr, capped at LogCapBytes
 	Err      error  // non-nil if the gate could not be executed at all
 	TimedOut bool
+	// Duration is measured around the gate itself, so a run the gate
+	// skipped or failed still reports how long it actually took rather
+	// than a placeholder zero.
+	Duration time.Duration
 }
 
 // RunPrecheck executes j.Precheck via `sh -c` in j.Cwd, bounded by
@@ -155,26 +159,42 @@ func RunPrecheck(ctx context.Context, j store.Job) PrecheckResult {
 	cmd.Env = childEnv()
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
-	// The gate is advisory context, not a program under our control: a
-	// failing gate should yield "precheck failed", not a Go panic.
-	cmd.Cancel = func() error { return context.Cause(ctx) }
+	// Cancel has to actually stop the gate. It was previously overridden
+	// with a hook that only reported the context's cause, which *replaces*
+	// the kill CommandContext installs rather than adding to it — so the
+	// deadline fired, the result said TimedOut, and cmd.Run went on
+	// blocking until the gate finished by itself: a `sleep 10` gate with a
+	// 1s timeout took 10s and still claimed to have timed out.
+	// terminateThenKill is what the job run paths already use — SIGTERM,
+	// then SIGKILL if that is ignored.
+	cmd.Cancel = terminateThenKill(cmd)
+	// And WaitDelay bounds the tail: output is captured through a pipe
+	// here (a buffer, not a file as the job paths use), and Wait blocks
+	// until every writer closes it — including any grandchild the gate
+	// left behind, which killing the shell does not reap.
+	cmd.WaitDelay = 2 * time.Second
 
+	start := time.Now()
 	err := cmd.Run()
+	elapsed := time.Since(start)
+
 	out := buf.String()
 	if len(out) > LogCapBytes {
 		out = out[:LogCapBytes] + "\n... [jobtail: precheck output truncated]"
 	}
 
-	if ctx.Err() != nil && (errors.Is(ctx.Err(), context.DeadlineExceeded)) {
-		return PrecheckResult{ExitCode: 2, Output: out, Err: fmt.Errorf("precheck timed out after %ds", j.PrecheckTimeoutSeconds), TimedOut: true}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return PrecheckResult{ExitCode: 2, Output: out, TimedOut: true, Duration: elapsed,
+			Err: fmt.Errorf("precheck timed out after %ds", j.PrecheckTimeoutSeconds)}
 	}
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return PrecheckResult{ExitCode: exitErr.ExitCode(), Output: out}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return PrecheckResult{ExitCode: exitErr.ExitCode(), Output: out, Duration: elapsed}
 		}
-		return PrecheckResult{ExitCode: 2, Output: out, Err: err}
+		return PrecheckResult{ExitCode: 2, Output: out, Err: err, Duration: elapsed}
 	}
-	return PrecheckResult{ExitCode: 0, Output: out}
+	return PrecheckResult{ExitCode: 0, Output: out, Duration: elapsed}
 }
 
 // RunAgent runs one headless agent-CLI turn in job.Cwd, dispatching on

@@ -97,6 +97,8 @@ CREATE TABLE jobs (
   permission_mode TEXT,                     -- kind='agent': meaning is provider-specific, see §14
   max_concurrent INTEGER NOT NULL DEFAULT 1,
   timeout_seconds INTEGER,                  -- optional hard kill
+  precheck      TEXT,                       -- optional shell gate, see §19
+  precheck_timeout_seconds INTEGER,         -- optional hard kill for the gate
   created_at    TEXT NOT NULL,
   updated_at    TEXT NOT NULL
 );
@@ -105,7 +107,7 @@ CREATE TABLE runs (
   id            TEXT PRIMARY KEY,           -- uuid
   job_id        TEXT NOT NULL REFERENCES jobs(id),
   trigger       TEXT NOT NULL,              -- 'scheduled' | 'manual' | 'resume'
-  status        TEXT NOT NULL,              -- 'running' | 'ok' | 'failed' | 'timeout' | 'skipped_overlap'
+  status        TEXT NOT NULL,              -- 'running' | 'ok' | 'failed' | 'timeout' | 'skipped' | 'skipped_overlap'
   started_at    TEXT NOT NULL,
   finished_at   TEXT,
   exit_code     INTEGER,
@@ -498,7 +500,7 @@ Conventional-commit parsing was the obvious alternative and was rejected: this r
 
 The tempting shape — a workflow that pushes a tag, and the existing tag-triggered workflow that builds it — does not work: GitHub deliberately does not fire workflows for events pushed with the default `GITHUB_TOKEN`. The tag would land and nothing would happen. Working around it needs a personal access token stored as a secret. Doing the whole job in one workflow avoids both the trap and the credential, and `gh release create` creates the tag itself as a side effect of publishing.
 
-That same rule is also what stops the obvious loop: the tag this workflow creates cannot re-trigger the workflow.
+That rule is documented to stop the obvious loop too — the tag this workflow creates should not be able to re-trigger it. It did anyway, on the very first release cut this way: the duplicate run failed on `a release with the same tag name already exists`. So the rule is not relied on in either direction; the version step asks whether the release already exists and exits cleanly if it does, which also makes re-running a release by hand a no-op rather than a red X.
 
 Releases run under `concurrency: release` so two merges landing close together queue instead of racing to claim the same version number.
 
@@ -513,3 +515,27 @@ It also checks the shipped `darwin/arm64` binary carries a code signature, by re
 ### The cost of this
 
 Every merge bumps the version, and jobtail tells users about new versions: each release means an update-available notice and, for anyone who takes it, a 14 MB download. For a merge that changes nothing they would run — a typo, a note in this document — that is pure noise, which is what `[skip release]` is for. Using it is a judgement call per merge rather than a rule, and if the noise becomes a problem the honest fix is to skip releases for merges that touch no Go code, not to go back to tagging by hand.
+
+## 19. Precheck gates
+
+A job may carry an optional `precheck`: a shell command run in the job's `cwd` before the job itself, whose exit code decides what happens next.
+
+| Gate exits | Run status | What happens |
+|---|---|---|
+| `0` | (job runs) | The gate's stdout is appended to an `agent` job's prompt under a `--- PENDING ITEMS (from precheck) ---` heading, capped at 16 KB |
+| `1` | `skipped` | The job does not run at all |
+| `≥ 2`, or the gate could not be executed, or it timed out | `failed` | The job does not run |
+
+The motivating shape is an agent job that should only spend a turn when there is something to work on — query a backlog, exit 1 when it is empty, otherwise print the items and let the agent act on exactly those. Splitting "is there anything to do" from "do it" keeps the expensive, non-deterministic half from running on an empty queue, and means the cheap half stays an ordinary shell command that can be tested on its own.
+
+`skipped` is deliberately distinct from `skipped_overlap`: the latter means the previous run was still going, which is a scheduling condition, while this one means the gate looked and found nothing, which is a normal successful outcome. Neither notifies (§8 only notifies on `failed`/`timeout`).
+
+**The gate's transcript is always written to the run's log**, whatever it decides — a skipped run that showed nothing at all would be indistinguishable from a broken one. That is why the four execution paths open the log with `O_APPEND` rather than `os.Create`: the gate's section is written first and the job's own output lands underneath it. `runner.Execute` truncates the log once up front so that re-executing the same run id still replaces the previous attempt rather than piling onto it, which `os.Create` used to guarantee for free.
+
+### The timeout has to actually kill
+
+`precheck_timeout_seconds` bounds the gate the way `timeout_seconds` bounds the job, and the first implementation did not work: it set `cmd.Cancel` to a hook that only reported the context's cause. `exec.CommandContext` installs its own `Cancel` that kills the process, and assigning to it *replaces* that kill rather than adding to it — so the deadline fired, the result said `TimedOut: true`, and `cmd.Run` went on blocking until the gate finished by itself. Measured: a `sleep 10` gate with a one-second timeout took 10.003 s and still reported "precheck timed out after 1s". A bound that reports success while not being enforced is worse than no bound, because nothing looks wrong.
+
+It now uses `terminateThenKill`, the same SIGTERM-then-SIGKILL hook the job run paths use. `WaitDelay` is set as well, for a reason specific to this path: the gate's output is captured through a pipe into a buffer (the job paths write to a file descriptor directly), and `Wait` blocks until every writer closes that pipe — including a grandchild the gate left behind, which killing the shell does not reap. The regression test asserts on *elapsed time*, because the reported outcome was already correct while the behaviour was not.
+
+The gate's measured duration is what a skipped or gate-failed run records, rather than the zero a placeholder helper used to return for every one of them.

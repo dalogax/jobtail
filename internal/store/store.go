@@ -276,7 +276,7 @@ func scanJob(row *sql.Row) (Job, error) {
 // "fix" this without measuring it.
 func (s *Store) ListJobs(ctx context.Context) ([]JobSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT j.id, j.kind, j.cron, j.timezone, j.enabled, j.cwd, j.command, j.prompt, j.provider, j.model,
+		SELECT j.id, j.kind, j.cron, j.timezone, j.enabled, j.cwd, j.command, j.prompt, j.model, j.provider,
 		       j.permission_mode, j.max_concurrent, j.timeout_seconds, j.keep, j.precheck, j.precheck_timeout_seconds,
 		       j.created_at, j.updated_at,
 		       (SELECT COUNT(*) FROM runs r WHERE r.job_id = j.id) AS run_count,
@@ -295,7 +295,7 @@ func (s *Store) ListJobs(ctx context.Context) ([]JobSummary, error) {
 		var command, prompt, model, provider, permMode, precheck, lastStatus, lastRunAt sql.NullString
 		var timeoutSeconds, precheckTimeout sql.NullInt64
 		var createdAt, updatedAt string
-		if err := rows.Scan(&js.ID, &js.Kind, &js.Cron, &js.Timezone, &enabled, &js.Cwd, &command, &prompt, &provider, &model,
+		if err := rows.Scan(&js.ID, &js.Kind, &js.Cron, &js.Timezone, &enabled, &js.Cwd, &command, &prompt, &model, &provider,
 			&permMode, &js.MaxConcurrent, &timeoutSeconds, &js.Keep, &precheck, &precheckTimeout,
 			&createdAt, &updatedAt,
 			&js.RunCount, &lastStatus, &lastRunAt); err != nil {
@@ -622,7 +622,8 @@ func placeholders(n int) string {
 func (s *Store) EnabledJobs(ctx context.Context) ([]Job, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, kind, cron, timezone, enabled, cwd, command, prompt, model, provider,
-		       permission_mode, max_concurrent, timeout_seconds, keep, created_at, updated_at
+		       permission_mode, max_concurrent, timeout_seconds, keep,
+		       precheck, precheck_timeout_seconds, created_at, updated_at
 		FROM jobs WHERE enabled = 1 ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -632,11 +633,12 @@ func (s *Store) EnabledJobs(ctx context.Context) ([]Job, error) {
 	for rows.Next() {
 		var j Job
 		var enabled int
-		var command, prompt, model, provider, permMode sql.NullString
-		var timeoutSeconds sql.NullInt64
+		var command, prompt, model, provider, permMode, precheck sql.NullString
+		var timeoutSeconds, precheckTimeout sql.NullInt64
 		var createdAt, updatedAt string
 		if err := rows.Scan(&j.ID, &j.Kind, &j.Cron, &j.Timezone, &enabled, &j.Cwd, &command, &prompt, &model, &provider,
-			&permMode, &j.MaxConcurrent, &timeoutSeconds, &j.Keep, &createdAt, &updatedAt); err != nil {
+			&permMode, &j.MaxConcurrent, &timeoutSeconds, &j.Keep,
+			&precheck, &precheckTimeout, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		j.Enabled = enabled != 0
@@ -646,6 +648,8 @@ func (s *Store) EnabledJobs(ctx context.Context) ([]Job, error) {
 		j.Provider = provider.String
 		j.PermissionMode = permMode.String
 		j.TimeoutSeconds = timeoutSeconds.Int64
+		j.Precheck = precheck.String
+		j.PrecheckTimeoutSeconds = precheckTimeout.Int64
 		if j.CreatedAt, err = strToTime(createdAt); err != nil {
 			return nil, err
 		}

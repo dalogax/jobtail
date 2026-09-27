@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dalogax/jobtail/internal/store"
 )
@@ -110,4 +111,94 @@ func TestPrecheckPassInjectsContext(t *testing.T) {
 	if !strings.Contains(string(log), "[jobtail precheck] passed") {
 		t.Fatalf("log missing pass header: %s", log)
 	}
+}
+
+func cliJob(precheck, command string) store.Job {
+	return store.Job{
+		ID: "c1", Kind: "cli", Cron: "* * * * *", Timezone: "local", Enabled: true,
+		Cwd: "/tmp", Command: command, Precheck: precheck,
+	}
+}
+
+// TestPrecheckLogPrecedesJobOutput covers the reason the execengine run
+// paths switched from os.Create to O_APPEND: the gate writes its section
+// first and the job's own output has to land underneath it rather than
+// replacing it.
+func TestPrecheckLogPrecedesJobOutput(t *testing.T) {
+	st := testStore(t)
+	logPath := filepath.Join(t.TempDir(), "run.log")
+
+	res, err := Execute(context.Background(), st, cliJob("echo gate-saw-this", "echo job-ran"), "r1", logPath)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.Status != "ok" {
+		t.Fatalf("want ok, got %s (exit %d)", res.Status, res.ExitCode)
+	}
+
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(log)
+	gate, job := strings.Index(s, "gate-saw-this"), strings.Index(s, "job-ran")
+	if gate < 0 || job < 0 {
+		t.Fatalf("log is missing the gate's or the job's output:\n%s", s)
+	}
+	if gate > job {
+		t.Errorf("the gate's output should come first:\n%s", s)
+	}
+}
+
+// TestRerunningTheSameRunReplacesItsLog is the other half of that change.
+// O_APPEND alone would make a second execution of the same run id pile onto
+// the first attempt's output, which os.Create used to prevent; Execute now
+// truncates the file up front to keep that guarantee.
+func TestRerunningTheSameRunReplacesItsLog(t *testing.T) {
+	st := testStore(t)
+	logPath := filepath.Join(t.TempDir(), "run.log")
+	j := cliJob("echo gate", "echo attempt")
+
+	for i := 0; i < 2; i++ {
+		if _, err := Execute(context.Background(), st, j, "r2", logPath); err != nil {
+			t.Fatalf("run %d: %v", i, err)
+		}
+	}
+
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(log), "attempt"); n != 1 {
+		t.Errorf("log kept %d attempts, want only the latest:\n%s", n, log)
+	}
+}
+
+// A skipped run should report how long the gate took, not a placeholder.
+func TestSkippedRunReportsTheGatesDuration(t *testing.T) {
+	st := testStore(t)
+	logPath := filepath.Join(t.TempDir(), "run.log")
+
+	res, err := Execute(context.Background(), st, cliJob("sleep 0.25; exit 1", "echo never"), "r3", logPath)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.Status != "skipped" {
+		t.Fatalf("want skipped, got %s", res.Status)
+	}
+	if res.Duration < 200*time.Millisecond {
+		t.Errorf("Duration = %s, want the ~250ms the gate actually took", res.Duration)
+	}
+	if strings.Contains(readFile(t, logPath), "never") {
+		t.Error("the job ran even though the gate said skip")
+	}
+}
+
+func readFile(t *testing.T, p string) string {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

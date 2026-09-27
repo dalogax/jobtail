@@ -6,10 +6,14 @@ name: release
 # so, and nothing at all if it says [skip release].
 #
 # One workflow does the whole job — compute, test, build, publish — on
-# purpose. Splitting it so that a tag push triggered the build would not
-# work: GitHub deliberately does not fire workflows for events pushed with
-# the default GITHUB_TOKEN, so the tag would land and nothing would happen.
-# Doing it in one place also avoids needing a PAT.
+# purpose, rather than pushing a tag and letting a tag-triggered workflow
+# build it. That split is documented to fail (GitHub does not fire
+# workflows for events pushed with the default GITHUB_TOKEN, so the tag
+# would land and nothing would happen) and working around it needs a PAT.
+#
+# In practice the tag this workflow creates *did* re-trigger it, so that
+# rule cannot be relied on in either direction: the version step checks for
+# an existing release and exits cleanly instead.
 
 on:
   push:
@@ -29,7 +33,12 @@ permissions:
   contents: write
 
 # Two merges landing close together must not race to claim the same version
-# number, so releases queue rather than run side by side.
+# number, so releases queue rather than run side by side. Only one run can
+# be queued at a time, so a third arriving cancels the waiting one — merges
+# in quick succession therefore coalesce into a single release rather than
+# producing one each. That cancelled run is expected, not a failure: a
+# release is a snapshot of main, so the next one carries the skipped
+# commits too.
 concurrency:
   group: release
   cancel-in-progress: false
@@ -51,11 +60,28 @@ jobs:
         env:
           BUMP: ${{ inputs.bump }}
           MESSAGE: ${{ github.event.head_commit.message }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
+          # Already released? Then there is nothing to do, and saying so is
+          # not a failure. Creating a release also creates its tag, and that
+          # tag push turns out to trigger this workflow a second time — the
+          # rule that GITHUB_TOKEN-pushed events don't start workflows did
+          # not hold for it in practice, and the duplicate run died on
+          # "a release with the same tag name already exists". Re-running a
+          # release by hand hits the same thing. Checking first turns both
+          # into a clean no-op.
+          already_released() {
+            gh release view "$1" >/dev/null 2>&1
+          }
+
           # A tag push means "release exactly this".
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            if already_released "${GITHUB_REF_NAME}"; then
+              echo "${GITHUB_REF_NAME} is already released; nothing to do"
+              exit 0
+            fi
             echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
             echo "releasing ${GITHUB_REF_NAME} (explicit tag)"
             exit 0
@@ -103,8 +129,12 @@ jobs:
           esac
 
           next="v${major}.${minor}.${patch}"
+          if already_released "${next}"; then
+            echo "${next} is already released; nothing to do"
+            exit 0
+          fi
           if git rev-parse -q --verify "refs/tags/${next}" >/dev/null; then
-            echo "::error::${next} already exists — the previous run may have half-finished"
+            echo "::error::tag ${next} exists but has no release — a previous run half-finished"
             exit 1
           fi
 
