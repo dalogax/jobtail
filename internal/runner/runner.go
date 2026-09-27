@@ -25,16 +25,25 @@ import (
 // "failed". Either early outcome is written to the run's log so the
 // dashboard always shows what the gate decided and why.
 func Execute(ctx context.Context, st *store.Store, j store.Job, runID, logPath string) (execengine.Result, error) {
+	// The execengine run paths open the log with O_APPEND so a precheck
+	// section written here survives underneath the job's own output. That
+	// makes establishing the file this function's job: without it, running
+	// the same run id twice would append to the previous attempt rather
+	// than replace it, which is what os.Create used to guarantee.
+	if err := truncateLog(logPath); err != nil {
+		return execengine.Result{}, err
+	}
+
 	if j.Precheck != "" {
 		pc := execengine.RunPrecheck(ctx, j)
-		if err := writePrecheckLog(logPath, pc, j); err != nil {
+		if err := writePrecheckLog(logPath, pc); err != nil {
 			return execengine.Result{}, err
 		}
 		switch {
 		case pc.ExitCode == 1:
-			return execengine.Result{Status: "skipped", ExitCode: 1, Duration: pcDuration(pc)}, nil
+			return execengine.Result{Status: "skipped", ExitCode: 1, Duration: pc.Duration}, nil
 		case pc.ExitCode != 0:
-			return execengine.Result{Status: "failed", ExitCode: pc.ExitCode, Duration: pcDuration(pc)}, pc.Err
+			return execengine.Result{Status: "failed", ExitCode: pc.ExitCode, Duration: pc.Duration}, pc.Err
 		}
 		// Gate passed: give the agent the pending items the gate found.
 		j.Prompt = appendPrecheckContext(j.Prompt, pc.Output)
@@ -55,7 +64,7 @@ func Execute(ctx context.Context, st *store.Store, j store.Job, runID, logPath s
 // either as the whole log (skip/fail outcomes, where the gate is all there
 // is to show) or as the leading section before the agent's own transcript
 // appends to the same file.
-func writePrecheckLog(logPath string, pc execengine.PrecheckResult, j store.Job) error {
+func writePrecheckLog(logPath string, pc execengine.PrecheckResult) error {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("[jobtail precheck] exit=%d\n", pc.ExitCode))
 	if pc.Err != nil {
@@ -68,7 +77,25 @@ func writePrecheckLog(logPath string, pc execengine.PrecheckResult, j store.Job)
 	if pc.ExitCode == 0 {
 		b.WriteString("[jobtail precheck] passed; starting job\n\n")
 	}
-	return os.WriteFile(logPath, []byte(b.String()), 0o644)
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(b.String()); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// truncateLog creates the run's log, or empties it if it somehow already
+// exists, leaving it for the precheck and then the job to append to.
+func truncateLog(logPath string) error {
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 // appendPrecheckContext appends the gate's captured output to an agent
@@ -84,12 +111,6 @@ func appendPrecheckContext(prompt, output string) string {
 		trimmed = trimmed[:maxCtx] + "\n... [truncated by jobtail]"
 	}
 	return prompt + "\n\n--- PENDING ITEMS (from precheck) ---\n" + trimmed
-}
-
-func pcDuration(pc execengine.PrecheckResult) time.Duration {
-	// The gate itself has no separately measured duration in Result terms;
-	// zero keeps the runs table honest instead of guessing.
-	return 0
 }
 
 // Finish records the outcome and, on failure, tries a Herdr desktop

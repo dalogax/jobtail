@@ -103,7 +103,29 @@ A few things exist specifically because the job is an agent, not a shell command
 - **Session capture + resume.** Every agent run's session (or, for codex, thread) id is captured as soon as it starts, even if the run later fails. `jobtail resume <run-id>` hands a failed run to an interactive session in the same CLI that produced it (`claude --resume`, `opencode --session`, or `codex resume`), so you can pick up exactly where an unattended run got stuck instead of starting over.
 - **A sane default permission mode.** Unattended `claude`/`codex` runs default to `acceptEdits`/`workspace-write` respectively — auto-accepts file edits, never `bypassPermissions`/`danger-full-access` unless a job explicitly opts in via `--permission-mode` (its meaning is provider-specific — see `jobtail add --help`). (Avoid `--permission-mode plan` for scheduled `claude` jobs: it expects an interactive approval that headless mode can never provide, and the run will just hang.)
 
-This isn't tied to any particular terminal or workflow — it works the same whether you're driving it from a plain SSH session, tmux, or nothing open at all (the systemd timer doesn't need a terminal to fire).
+This isn't tied to any particular terminal or workflow — it works the same whether you're driving it from a plain SSH session, tmux, or nothing open at all (the timer doesn't need a terminal to fire).
+
+### Only run the agent when there's something to do
+
+An agent turn costs real time and real tokens, so a job can carry a `--precheck`: a shell command run before it that decides whether the job runs at all.
+
+```sh
+jobtail add triage-backlog --kind agent --cron "0 * * * *" \
+  --cwd ~/code/myproject \
+  --precheck './list-open-tickets.sh' \
+  --precheck-timeout-seconds 30 \
+  --prompt "Triage each ticket below: reproduce it, and either fix it or explain why not."
+```
+
+| The precheck exits | What happens |
+|---|---|
+| `0` | The job runs, and the precheck's output is handed to the agent as `PENDING ITEMS` context appended to the prompt |
+| `1` | The run is marked **skipped** — the agent never starts |
+| anything else | The run is marked **failed** |
+
+So the cheap, deterministic half ("is there anything to do, and what?") stays an ordinary shell command you can test on its own, and the expensive half only runs when the answer is yes — on exactly the items the gate found.
+
+The precheck's output is always written to the run's log, whatever it decided, so a skipped run still shows you what it saw. `--precheck-timeout-seconds` bounds the gate itself, separately from `--timeout-seconds` for the job.
 
 ## Herdr integration (optional)
 
@@ -137,7 +159,7 @@ Every command supports `--json` for scripting. `jobtail <command> --help` for th
 
 ## How it works, and why
 
-The full design — every decision, the alternatives considered, and why they were rejected — is written up in [`PRD.md`](PRD.md). Short version: single Go binary, no config file, SQLite in WAL mode, a systemd user timer instead of a bundled scheduler daemon, and a Bubble Tea TUI that's a plain terminal program rather than anything requiring a specific host.
+The full design — every decision, the alternatives considered, and why they were rejected — is written up in [`PRD.md`](PRD.md). Short version: single Go binary, no config file, SQLite in WAL mode, a per-user OS timer instead of a bundled scheduler daemon, and a Bubble Tea TUI that's a plain terminal program rather than anything requiring a specific host.
 
 ## License
 
