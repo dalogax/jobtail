@@ -98,8 +98,7 @@ Description=jobtail: check for due jobs
 [Service]
 Type=oneshot
 ExecStart=%s tick
-%s
-# tick spawns each due job's run-exec as a detached grandchild and returns
+%s# tick spawns each due job's run-exec as a detached grandchild and returns
 # immediately — run-exec is meant to keep running long after this oneshot
 # unit itself exits. Without this, systemd's default KillMode
 # (control-group) sends every remaining process in this unit's cgroup a
