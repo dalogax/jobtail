@@ -1,0 +1,21 @@
+.tool-versions
+  s_9546586a2895d6::t_24794c2b5b4abe 1
+internal/store/store.go
+  s_9546586a2895d6::t_387c01a12e6c10 378-389
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bad6e3aecae83cd814d7f07bf02009fc1d102c14",
+  "prompts": {},
+  "sessions": {
+    "s_9546586a2895d6": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f27918b40ffeo0d4XToMgiIlgW",
+        "model": "unknown"
+      },
+      "human_author": "Daniel López García <daniellgarc@inditex.com>"
+    }
+  }
+}
