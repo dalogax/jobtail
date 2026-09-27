@@ -36,9 +36,6 @@ concurrency:
 
 jobs:
   release:
-    # A merge that changes nothing a user would download — a typo fix, a
-    # note in the PRD — can say so and skip the version bump.
-    if: "!contains(github.event.head_commit.message, '[skip release]')"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -64,6 +61,23 @@ jobs:
             exit 0
           fi
 
+          # Markers are read from the first line only — for a squash merge,
+          # the PR title. Scanning the whole message means any commit that
+          # merely *discusses* a marker trips it, which is not hypothetical:
+          # the commit that introduced this workflow described all three in
+          # its body, and an earlier version of this step read "[major]" out
+          # of that prose and would have cut a v1.0.0. A marker has to be a
+          # deliberate, visible act, not a substring.
+          subject="$(printf '%s\n' "$MESSAGE" | head -n1)"
+
+          case "$subject" in
+            *"[skip release]"*)
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "subject says [skip release]; not releasing"
+              exit 0
+              ;;
+          esac
+
           latest="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n1)"
           [ -n "$latest" ] || latest="v0.0.0"
 
@@ -74,7 +88,7 @@ jobs:
 
           bump="${BUMP:-}"
           if [ -z "$bump" ]; then
-            case "$MESSAGE" in
+            case "$subject" in
               *"[major]"*) bump=major ;;
               *"[minor]"*) bump=minor ;;
               *)           bump=patch ;;
@@ -98,9 +112,11 @@ jobs:
           echo "${latest} + ${bump} -> ${next}"
 
       - name: Test
+        if: steps.version.outputs.version != ''
         run: go test ./...
 
       - name: Build release binaries
+        if: steps.version.outputs.version != ''
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
@@ -126,6 +142,7 @@ jobs:
       # being true, so check the Mach-O carries a signature before shipping
       # it. See PRD §17.
       - name: Check the macOS arm64 binary is code-signed
+        if: steps.version.outputs.version != ''
         run: |
           python3 - <<'PY'
           import struct, sys
@@ -149,6 +166,7 @@ jobs:
           PY
 
       - name: Create release
+        if: steps.version.outputs.version != ''
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
