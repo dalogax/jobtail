@@ -472,3 +472,42 @@ Two smaller things the platform forces: `install-scheduler` now creates the data
 The backend targets a platform that isn't available here, so the tests compensate by being structural rather than textual. `cmd/jobtail/scheduler_test.go` parses the generated plist into the same key/value tree launchd will read and asserts on *that* — a substring check would happily pass on a plist with mismatched keys and values, or one whose `Label` no longer matches its filename (which launchd rejects outright). On a machine that has `plutil`, the plist is additionally linted by Apple's own parser, mirroring the `systemd-analyze verify` check the e2e suite already runs against the systemd units.
 
 What that does **not** cover, and what needs a real Mac to confirm: that `launchctl bootstrap` accepts the agent in the `gui/<uid>` domain, that the 60-second interval fires, and that a spawned `run-exec` genuinely survives `tick` exiting. The first two are conventional; the third is the one with a known counterpart failure on Linux, and is worth watching on the first install.
+
+## 18. Releasing
+
+Every merge to `main` publishes a release. Before this, releases were cut by hand — tag, push, watch — which worked while there were a handful of them and meant that whatever sat on `main` unreleased was invisible: PR #3's fix was merged and then simply didn't ship, because tagging is a separate act that is easy not to perform.
+
+### How the version is decided
+
+There is no version file to bump, and nothing to forget: the next version is derived from the last tag.
+
+| Merge commit says | Result |
+|---|---|
+| (anything) | patch — `v0.1.17` → `v0.1.18` |
+| `[minor]` | `v0.1.17` → `v0.2.0` |
+| `[major]` | `v0.1.17` → `v1.0.0` |
+| `[skip release]` | no release at all |
+
+`workflow_dispatch` takes an explicit `patch`/`minor`/`major` and wins over any marker; pushing a tag by hand still releases exactly that version, so the manual path is intact.
+
+Conventional-commit parsing was the obvious alternative and was rejected: this repo's history is written in prose sentences ("Make the dashboard fit any terminal…"), and adopting `feat:`/`fix:` prefixes would mean changing how every commit is written to serve the tooling rather than the reader.
+
+### One workflow, not two
+
+The tempting shape — a workflow that pushes a tag, and the existing tag-triggered workflow that builds it — does not work: GitHub deliberately does not fire workflows for events pushed with the default `GITHUB_TOKEN`. The tag would land and nothing would happen. Working around it needs a personal access token stored as a secret. Doing the whole job in one workflow avoids both the trap and the credential, and `gh release create` creates the tag itself as a side effect of publishing.
+
+That same rule is also what stops the obvious loop: the tag this workflow creates cannot re-trigger the workflow.
+
+Releases run under `concurrency: release` so two merges landing close together queue instead of racing to claim the same version number.
+
+### What gates a release
+
+`ci.yml` is new, and its absence was the real gap: until now *nothing* ran on a pull request. The only workflow triggered on tags, so the first time CI saw any code was after it had been merged and tagged. That was survivable when a human decided each release; it is not when merging publishes one. CI now runs gofmt, `go vet`, `go vet` for `GOOS=darwin` (the launchd backend is maintained from Linux machines — see §17 — so nothing else would notice it breaking), the test suite, and a build of all four released platforms.
+
+The release workflow re-runs the tests rather than trusting CI's earlier pass, so the tag can only ever point at code that tested green at that commit.
+
+It also checks the shipped `darwin/arm64` binary carries a code signature, by reading the Mach-O for an `LC_CODE_SIGNATURE` command with a valid `CS_SuperBlob`. Go's linker ad-hoc signs that target even when cross-compiling from Linux, but if it ever stopped, the symptom on Apple Silicon is the binary being `SIGKILL`ed on launch — indistinguishable from jobtail crashing, and impossible to spot from a Linux CI runner. The check was verified to fail on an unsigned binary, not merely to pass on a signed one.
+
+### The cost of this
+
+Every merge bumps the version, and jobtail tells users about new versions: each release means an update-available notice and, for anyone who takes it, a 14 MB download. For a merge that changes nothing they would run — a typo, a note in this document — that is pure noise, which is what `[skip release]` is for. Using it is a judgement call per merge rather than a rule, and if the noise becomes a problem the honest fix is to skip releases for merges that touch no Go code, not to go back to tagging by hand.

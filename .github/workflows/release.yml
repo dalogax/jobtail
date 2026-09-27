@@ -1,29 +1,108 @@
 name: release
 
+# Every merge to main publishes a release. The version is worked out from
+# the last tag rather than written down anywhere, so there is no file to
+# forget to bump: patch by default, minor or major if the merge commit says
+# so, and nothing at all if it says [skip release].
+#
+# One workflow does the whole job — compute, test, build, publish — on
+# purpose. Splitting it so that a tag push triggered the build would not
+# work: GitHub deliberately does not fire workflows for events pushed with
+# the default GITHUB_TOKEN, so the tag would land and nothing would happen.
+# Doing it in one place also avoids needing a PAT.
+
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
+    # An explicitly pushed tag still releases exactly that version, so
+    # cutting one by hand remains possible.
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Which part of the version to increment"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
 
 permissions:
   contents: write
 
+# Two merges landing close together must not race to claim the same version
+# number, so releases queue rather than run side by side.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
-  build-and-release:
+  release:
+    # A merge that changes nothing a user would download — a typo fix, a
+    # note in the PRD — can say so and skip the version bump.
+    if: "!contains(github.event.head_commit.message, '[skip release]')"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # every tag, or the next version can't be worked out
 
       - uses: actions/setup-go@v5
         with:
           go-version: "1.27.1"
+
+      - name: Work out the version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+
+          # A tag push means "release exactly this".
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "releasing ${GITHUB_REF_NAME} (explicit tag)"
+            exit 0
+          fi
+
+          latest="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n1)"
+          [ -n "$latest" ] || latest="v0.0.0"
+
+          rest="${latest#v}"
+          major="${rest%%.*}"; rest="${rest#*.}"
+          minor="${rest%%.*}"; patch="${rest#*.}"
+          patch="${patch%%-*}"   # ignore any pre-release suffix
+
+          bump="${BUMP:-}"
+          if [ -z "$bump" ]; then
+            case "$MESSAGE" in
+              *"[major]"*) bump=major ;;
+              *"[minor]"*) bump=minor ;;
+              *)           bump=patch ;;
+            esac
+          fi
+
+          case "$bump" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+            *) echo "::error::unknown bump '$bump'"; exit 1 ;;
+          esac
+
+          next="v${major}.${minor}.${patch}"
+          if git rev-parse -q --verify "refs/tags/${next}" >/dev/null; then
+            echo "::error::${next} already exists — the previous run may have half-finished"
+            exit 1
+          fi
+
+          echo "version=${next}" >> "$GITHUB_OUTPUT"
+          echo "${latest} + ${bump} -> ${next}"
 
       - name: Test
         run: go test ./...
 
       - name: Build release binaries
         env:
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -40,12 +119,45 @@ jobs:
               -o "$out" ./cmd/jobtail
           done
 
+      # Apple Silicon refuses to exec an unsigned binary — it is SIGKILLed
+      # on launch, which looks exactly like jobtail crashing rather than
+      # like a build problem. Go's linker ad-hoc signs darwin/arm64 even
+      # when cross-compiling, but nothing would tell us if that stopped
+      # being true, so check the Mach-O carries a signature before shipping
+      # it. See PRD §17.
+      - name: Check the macOS arm64 binary is code-signed
+        run: |
+          python3 - <<'PY'
+          import struct, sys
+          path = "dist/jobtail-darwin-arm64"
+          data = open(path, "rb").read()
+          magic, _cpu, _sub, _ftype, ncmds, _sz, _fl, _r = struct.unpack_from("<IiiIIIII", data, 0)
+          if magic != 0xfeedfacf:
+              sys.exit(f"::error::{path} is not a 64-bit Mach-O (magic {magic:#x})")
+          off, signed = 32, False
+          for _ in range(ncmds):
+              cmd, size = struct.unpack_from("<II", data, off)
+              if cmd == 0x1d:  # LC_CODE_SIGNATURE
+                  dataoff, _datasize = struct.unpack_from("<II", data, off + 8)
+                  blob, = struct.unpack_from(">I", data, dataoff)
+                  signed = blob == 0xfade0cc0  # CS_SuperBlob
+              off += size
+          if not signed:
+              sys.exit(f"::error::{path} has no valid code signature; it would be "
+                       "killed on launch on Apple Silicon")
+          print(f"{path}: code signature present")
+          PY
+
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --title "${{ github.ref_name }}" \
+          set -euo pipefail
+          # gh creates the tag itself, at this exact commit.
+          gh release create "$VERSION" \
+            --target "$GITHUB_SHA" \
+            --title "$VERSION" \
             --generate-notes \
             dist/jobtail-linux-amd64 \
             dist/jobtail-linux-arm64 \
