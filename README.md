@@ -38,7 +38,23 @@ jobtail          # opens the dashboard
 
 <p align="center"><img src="docs/screenshot.png" alt="jobtail dashboard: jobs and runs side by side on top, log spanning the full width below" width="900"></p>
 
-Jobs and runs side by side on top; the log — raw output for `cli` jobs, a rendered transcript for `agent` jobs — spans the full width below. Click or use the keyboard to move between them; live-tails while a run is in progress.
+Jobs and runs side by side on top; the log — raw output for `cli` jobs, a rendered transcript for `agent` jobs — spans the full width below. Click or use the keyboard to move between them; live-tails while a run is in progress. Failed runs are red, so "is anything broken?" is answered at a glance.
+
+### It fits the terminal you actually have
+
+The dashboard adapts to the window instead of assuming a wide one. There are three layouts, picked from the terminal's size:
+
+| Terminal | Layout |
+| --- | --- |
+| ≥ 100 cols | jobs and runs side by side, log full width below |
+| 56–99 cols | all three panes full width, stacked |
+| < 56 cols, or short | one pane at a time — the drill-down it already was |
+
+<p align="center"><img src="docs/screenshot-narrow.png" alt="jobtail on a 46-column terminal: a single full-width jobs pane with readable job names and statuses" width="320"></p>
+
+Columns are dropped whole rather than squeezed into ellipses, worst-first, so what's left stays readable — job names and statuses survive to the very last; run counts and cron expressions are the first to go. Spare width goes the other way: on a wide terminal the jobs table gains a `Cron` column and the runs table an `Exit` one. Panes are sized to their contents too, so a long job list gets the rows it needs instead of a fixed fraction of the screen.
+
+On a phone-sized terminal (SSH from a handset, a narrow split) the panes stop competing: you get one, full width, and move through jobs → runs → log with `enter` and `esc` exactly as before.
 
 ## Install
 
