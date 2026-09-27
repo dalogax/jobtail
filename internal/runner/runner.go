@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/dalogax/jobtail/internal/execengine"
@@ -17,7 +18,27 @@ import (
 )
 
 // Execute dispatches by job kind and runs to completion in-process.
+// When the job defines a precheck gate, it runs first: exit 0 proceeds
+// (with the gate's stdout appended to an agent job's prompt as pending-item
+// context), exit 1 marks the run "skipped" without executing the job, and
+// exit >=2 (or a gate that could not run / timed out) marks the run
+// "failed". Either early outcome is written to the run's log so the
+// dashboard always shows what the gate decided and why.
 func Execute(ctx context.Context, st *store.Store, j store.Job, runID, logPath string) (execengine.Result, error) {
+	if j.Precheck != "" {
+		pc := execengine.RunPrecheck(ctx, j)
+		if err := writePrecheckLog(logPath, pc, j); err != nil {
+			return execengine.Result{}, err
+		}
+		switch {
+		case pc.ExitCode == 1:
+			return execengine.Result{Status: "skipped", ExitCode: 1, Duration: pcDuration(pc)}, nil
+		case pc.ExitCode != 0:
+			return execengine.Result{Status: "failed", ExitCode: pc.ExitCode, Duration: pcDuration(pc)}, pc.Err
+		}
+		// Gate passed: give the agent the pending items the gate found.
+		j.Prompt = appendPrecheckContext(j.Prompt, pc.Output)
+	}
 	switch j.Kind {
 	case "cli":
 		return execengine.RunCLI(ctx, j, logPath)
@@ -28,6 +49,47 @@ func Execute(ctx context.Context, st *store.Store, j store.Job, runID, logPath s
 	default:
 		return execengine.Result{}, fmt.Errorf("unknown job kind %q", j.Kind)
 	}
+}
+
+// writePrecheckLog writes the gate's transcript to the run's log file —
+// either as the whole log (skip/fail outcomes, where the gate is all there
+// is to show) or as the leading section before the agent's own transcript
+// appends to the same file.
+func writePrecheckLog(logPath string, pc execengine.PrecheckResult, j store.Job) error {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("[jobtail precheck] exit=%d\n", pc.ExitCode))
+	if pc.Err != nil {
+		b.WriteString("[jobtail precheck] error: " + pc.Err.Error() + "\n")
+	}
+	b.WriteString(pc.Output)
+	if pc.Output != "" && !strings.HasSuffix(pc.Output, "\n") {
+		b.WriteString("\n")
+	}
+	if pc.ExitCode == 0 {
+		b.WriteString("[jobtail precheck] passed; starting job\n\n")
+	}
+	return os.WriteFile(logPath, []byte(b.String()), 0o644)
+}
+
+// appendPrecheckContext appends the gate's captured output to an agent
+// prompt, bounded like MessagePart previews: gates can emit large TSV
+// backlog dumps, and the agent only needs what it must act on.
+func appendPrecheckContext(prompt, output string) string {
+	if strings.TrimSpace(output) == "" {
+		return prompt
+	}
+	const maxCtx = 16 * 1024
+	trimmed := output
+	if len(trimmed) > maxCtx {
+		trimmed = trimmed[:maxCtx] + "\n... [truncated by jobtail]"
+	}
+	return prompt + "\n\n--- PENDING ITEMS (from precheck) ---\n" + trimmed
+}
+
+func pcDuration(pc execengine.PrecheckResult) time.Duration {
+	// The gate itself has no separately measured duration in Result terms;
+	// zero keeps the runs table honest instead of guessing.
+	return 0
 }
 
 // Finish records the outcome and, on failure, tries a Herdr desktop

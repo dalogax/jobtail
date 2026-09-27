@@ -1422,6 +1422,8 @@ func statusLabel(s string, width int) string {
 		return "never"
 	case "skipped_overlap":
 		return "skip"
+	case "skipped":
+		return "skip"
 	}
 	return s
 }
@@ -1434,6 +1436,8 @@ func statusStyle(s string) lipgloss.Style {
 		return statusFailed
 	case "running":
 		return statusRunning
+	case "skipped":
+		return statusNever
 	default:
 		return statusNever
 	}
