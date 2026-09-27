@@ -421,14 +421,14 @@ func TestGCPrunesPastRetention(t *testing.T) {
 	}
 }
 
-func TestInstallSystemdWritesUnits(t *testing.T) {
+func TestInstallSchedulerWritesUnits(t *testing.T) {
 	e := newEnv(t)
 	home := t.TempDir()
-	cmd := exec.Command(e.bin, "install-systemd")
+	cmd := exec.Command(e.bin, "install-scheduler")
 	cmd.Env = append(os.Environ(), "HOME="+home, "JOBTAIL_DATA_DIR="+e.dataDir)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("install-systemd: %v\n%s", err, out)
+		t.Fatalf("install-scheduler: %v\n%s", err, out)
 	}
 	svc := filepath.Join(home, ".config", "systemd", "user", "jobtail-tick.service")
 	timer := filepath.Join(home, ".config", "systemd", "user", "jobtail-tick.timer")
@@ -464,6 +464,26 @@ tick itself exits (confirmed live on a real box: jobs got stuck in
 		}
 	} else {
 		t.Skip("systemd-analyze not on PATH; skipping unit-file validation")
+	}
+}
+
+// TestInstallSystemdStillWorksAsAnAlias keeps the pre-macOS command name
+// working: it is what the README said for every release up to now, and what
+// anyone who set jobtail up before has in their notes.
+func TestInstallSystemdStillWorksAsAnAlias(t *testing.T) {
+	e := newEnv(t)
+	home := t.TempDir()
+	cmd := exec.Command(e.bin, "install-systemd")
+	cmd.Env = append(os.Environ(), "HOME="+home, "JOBTAIL_DATA_DIR="+e.dataDir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("install-systemd (alias): %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".config", "systemd", "user", "jobtail-tick.timer")); err != nil {
+		t.Fatalf("alias did not write the timer unit: %v", err)
+	}
+	if !strings.Contains(string(out), "install-scheduler") {
+		t.Errorf("alias should point at the new name, got:\n%s", out)
 	}
 }
 

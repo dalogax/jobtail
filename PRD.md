@@ -437,3 +437,38 @@ For reference, the 32 MiB `crypto/internal/fips140/drbg.memory` symbol that domi
 - `internal/cronx/cronx_bench_test.go` — keeps the local/IANA gap closed.
 - `internal/tui/refresh_test.go` — the safety net for all of the above. A refresh that skips work must never skip a *change*: a run appearing, a run finishing (which moves no row counts), a job toggled from another process, a log being appended to, a resize needing a re-wrap, two runs whose logs are the same size, a failing query still surfacing its error. One test asserts the skipping happens at all, so the others can't be satisfied by simply reloading everything again.
 - `scripts/bench.sh` — binary size, per-invocation wall time and peak RSS, and the dashboard's steady state via `scripts/bench_tui.py`, which drives the real binary in a real pty. CPU there comes from `wait4` rusage in microseconds, with startup cancelled by differencing two run lengths; `/proc/<pid>/stat` counts in 10 ms ticks (too coarse) and `/proc/<pid>/schedstat` reads near-zero unless `sched_schedstats` is on.
+
+## 17. macOS support
+
+jobtail advertised macOS from the start — `install.sh` resolves `darwin/amd64` and `darwin/arm64`, and the release workflow has always built both — but nothing on a Mac ever actually ran on a schedule. This section records what was and wasn't wrong, because most of the plausible suspects turned out to be fine.
+
+### What was already fine
+
+- **The binary.** Every package cross-compiles and vets clean for `darwin/amd64` and `darwin/arm64`. The only platform-specific code is `syscall.SIGTERM`/`SIGKILL` (present on Darwin) and `runtime.GOOS` in the self-updater, which is already doing the right thing. No `/proc`, no cgroups, no Linux-only syscalls.
+- **Code signing.** Apple Silicon refuses to run an unsigned binary at all — it is `SIGKILL`ed on exec, which presents exactly as "it doesn't work on macOS". Checked directly against the published `v0.1.16` asset rather than assumed: the Mach-O carries an `LC_CODE_SIGNATURE` load command with a valid `CS_SuperBlob` (`0xfade0cc0`). Go's linker ad-hoc signs `darwin/arm64` even when cross-compiling from Linux, so the existing release pipeline is already correct here.
+- **`jobtail upgrade`.** `selfupdate.Install` downloads to a temp file in the target directory and `os.Rename`s over the running binary, which works the same on macOS as on Linux. Downloads made by `curl` carry no `com.apple.quarantine` attribute, so Gatekeeper never enters the picture.
+
+### What was actually wrong
+
+**There was no scheduler.** `install-systemd` wrote `~/.config/systemd/user/*` and shelled out to `systemctl`, which does not exist on macOS. So a Mac user could add jobs, see them in the dashboard, and run them by hand — and nothing would ever fire on its own. That is the whole of "jobtail doesn't work on macOS".
+
+The command is now `install-scheduler` (with `install-systemd` kept as an alias, since it is what every README up to now said), and it installs whatever the platform schedules with. Backends are described as data in `cmd/jobtail/scheduler.go` rather than selected by build tag, so the macOS backend can be built and asserted on from a Linux machine — which matters when the maintainer's machine and CI are both Linux.
+
+### The two launchd details that decide whether jobs run
+
+Neither is discoverable from a failing run; both produce silence rather than an error.
+
+- **`AbandonProcessGroup`.** `tick` spawns each due job's `run-exec` as a detached grandchild and exits immediately. launchd's default is to `SIGKILL` everything left in the job's process group the moment the job exits, so without this key every run dies before it does anything. This is precisely the same failure `KillMode=process` exists to prevent in the systemd unit, where it was already hit for real on a live box — the same bug, a second time, in a different vocabulary.
+- **`EnvironmentVariables` → `PATH`.** A LaunchAgent starts with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`. Homebrew (`/opt/homebrew/bin`, `/usr/local/bin`) and `~/.local/bin` are not on it, so `claude`, `opencode`, `codex` and most of what a `cli` job shells out to would not resolve — every agent job failing with "executable file not found". The agent therefore records the `PATH` in effect when `install-scheduler` ran, unioned with the usual Homebrew locations. The cost is that it is a snapshot: installing a tool somewhere new means re-running the command, which the plist says in its own comments.
+
+Systemd deliberately does *not* get the same `PATH` treatment — a `systemd --user` service inherits the user manager's environment, which on a normal desktop session is the one the user expects, and pinning it to whatever shell ran the install would be a regression.
+
+`JOBTAIL_DATA_DIR` is passed to both backends when it is set, which fixes a latent bug on Linux too: a scheduled tick inherits nothing from the shell that installed it, so a custom data directory meant the dashboard and the timer were reading different databases — jobs sitting there listed and never firing, with nothing to say why.
+
+Two smaller things the platform forces: `install-scheduler` now creates the data directory before loading the agent, because launchd refuses to start a job whose `StandardOutPath` it cannot open; and the agent redirects `tick`'s output to `<data dir>/scheduler.log`, since launchd gives an agent no journal and otherwise there is no way to answer "did the scheduler run?". `tick` only prints when it actually fires something, so the file stays small.
+
+### Testing something you can't run
+
+The backend targets a platform that isn't available here, so the tests compensate by being structural rather than textual. `cmd/jobtail/scheduler_test.go` parses the generated plist into the same key/value tree launchd will read and asserts on *that* — a substring check would happily pass on a plist with mismatched keys and values, or one whose `Label` no longer matches its filename (which launchd rejects outright). On a machine that has `plutil`, the plist is additionally linted by Apple's own parser, mirroring the `systemd-analyze verify` check the e2e suite already runs against the systemd units.
+
+What that does **not** cover, and what needs a real Mac to confirm: that `launchctl bootstrap` accepts the agent in the `gui/<uid>` domain, that the 60-second interval fires, and that a spawned `run-exec` genuinely survives `tick` exiting. The first two are conventional; the third is the one with a known counterpart failure on Linux, and is worth watching on the first install.
