@@ -1,0 +1,19 @@
+internal/runner/precheck_test.go
+  s_9546586a2895d6::t_53c711d7af69c0 89-92
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6ce83a00bc79e3ae09e333ec7975248fc164ac9f",
+  "prompts": {},
+  "sessions": {
+    "s_9546586a2895d6": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f27918b40ffeo0d4XToMgiIlgW",
+        "model": "unknown"
+      },
+      "human_author": "Daniel López García <daniellgarc@inditex.com>"
+    }
+  }
+}
