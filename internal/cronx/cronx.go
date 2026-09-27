@@ -5,6 +5,7 @@ package cronx
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -41,14 +42,30 @@ func Due(expr, timezone string, lastFire, now time.Time) (due bool, at time.Time
 	return true, next, nil
 }
 
+// locCache memoizes time.LoadLocation, which reads and parses the zoneinfo
+// file every call — it caches nothing but "UTC" and "Local". That read landed
+// on two paths that repeat it: `jobtail tick` asks for every enabled job's
+// next fire once a minute, and the dashboard's Next column asks for every
+// job's on every rebuild of the jobs table. Measured, a job on an IANA
+// timezone cost 5.3 µs per Next against 0.93 µs for a local one, all of the
+// difference being that lookup. A location for a given name never changes
+// within a process, so once is enough.
+var locCache sync.Map // timezone name -> *time.Location
+
 func loadLocation(timezone string) (*time.Location, error) {
 	if timezone == "" || timezone == "local" {
 		return time.Local, nil
 	}
+	if cached, ok := locCache.Load(timezone); ok {
+		return cached.(*time.Location), nil
+	}
 	loc, err := time.LoadLocation(timezone)
 	if err != nil {
+		// Deliberately not cached: a failure is a bad job definition worth
+		// re-reporting, and there are only ever a handful of them.
 		return nil, fmt.Errorf("load timezone %q: %w", timezone, err)
 	}
+	locCache.Store(timezone, loc)
 	return loc, nil
 }
 

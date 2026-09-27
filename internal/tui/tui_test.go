@@ -13,6 +13,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/dalogax/jobtail/internal/store"
 )
@@ -29,7 +31,7 @@ func init() {
 	refreshInterval = time.Millisecond // don't pay tea.Tick's real sleep in tests
 }
 
-func seedStore(t *testing.T) (*store.Store, string) {
+func seedStore(t testing.TB) (*store.Store, string) {
 	t.Helper()
 	dir := t.TempDir()
 	logsDir := filepath.Join(dir, "logs")
@@ -67,14 +69,14 @@ func seedStore(t *testing.T) (*store.Store, string) {
 
 // send applies one message and fully resolves whatever tea.Cmd chain it
 // triggers (batches unwrapped, nested cmds followed) before returning.
-func send(t *testing.T, m model, msg tea.Msg) model {
+func send(t testing.TB, m model, msg tea.Msg) model {
 	t.Helper()
 	newM, cmd := m.Update(msg)
 	m = newM.(model)
 	return resolve(t, m, cmd)
 }
 
-func resolve(t *testing.T, m model, cmd tea.Cmd) model {
+func resolve(t testing.TB, m model, cmd tea.Cmd) model {
 	t.Helper()
 	for _, msg := range runCmd(cmd) {
 		m = send(t, m, msg)
@@ -147,7 +149,7 @@ func TestLongLogLineIsWrappedNotCropped(t *testing.T) {
 	m = send(t, m, tea.WindowSizeMsg{Width: 100, Height: 40}) // narrower than longLine
 	m = resolve(t, m, m.Init())
 	m.selectJobByID("longlog") // seedStore's "greet" sorts first alphabetically otherwise
-	m = resolve(t, m, reloadRunsCmd(m.ctx, m.st, "longlog"))
+	m = resolve(t, m, m.reloadRuns("longlog"))
 	m = send(t, m, special(tea.KeyEnter)) // jobs -> runs
 	m = send(t, m, special(tea.KeyEnter)) // runs -> log
 
@@ -156,6 +158,63 @@ func TestLongLogLineIsWrappedNotCropped(t *testing.T) {
 	m.logVP.GotoBottom()
 	if !strings.Contains(m.logVP.View(), "FINDME-TAIL-MARKER") {
 		t.Fatalf("long line's tail was lost — cropped instead of wrapped:\n%s", m.logVP.View())
+	}
+}
+
+// TestArrowKeysMoveTheCursorInEveryListPane is the regression test for a bug
+// the help bar was advertising the whole time: bubbles/table's Update returns
+// immediately unless the table is focused, only the jobs table ever was, and
+// nothing called Focus when the pane changed — so ↑/↓ in the runs pane did
+// nothing at all. The mouse hid it, because the wheel and click paths call
+// MoveUp/MoveDown/SetCursor directly instead of going through table.Update.
+func TestArrowKeysMoveTheCursorInEveryListPane(t *testing.T) {
+	st, logsDir := seedStore(t)
+	addJobs(t, st, "worker", 3)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		runID := fmt.Sprintf("extra-run-%d", i)
+		logPath := filepath.Join(logsDir, runID+".log")
+		if err := os.WriteFile(logPath, []byte(runID+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		run, err := st.StartRun(ctx, "greet", runID, "scheduled", logPath,
+			time.Now().Add(time.Duration(i+1)*time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.FinishRun(ctx, run.ID, "ok", 0, time.Now(), 10); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := modelAt(t, st, logsDir, 172, 40)
+	if got := m.jobsTable.Cursor(); got != 0 {
+		t.Fatalf("jobs cursor should start at 0, got %d", got)
+	}
+	m = send(t, m, special(tea.KeyDown))
+	if got := m.jobsTable.Cursor(); got != 1 {
+		t.Errorf("down in the jobs pane left the cursor at %d, want 1", got)
+	}
+	m = send(t, m, special(tea.KeyUp))
+	if got := m.jobsTable.Cursor(); got != 0 {
+		t.Errorf("up in the jobs pane left the cursor at %d, want 0", got)
+	}
+
+	m = send(t, m, special(tea.KeyEnter)) // jobs -> runs
+	m = send(t, m, special(tea.KeyDown))
+	if got := m.runsTable.Cursor(); got != 1 {
+		t.Errorf("down in the runs pane left the cursor at %d, want 1", got)
+	}
+	m = send(t, m, special(tea.KeyUp))
+	if got := m.runsTable.Cursor(); got != 0 {
+		t.Errorf("up in the runs pane left the cursor at %d, want 0", got)
+	}
+
+	// Going back up a level must hand the keys back to the jobs table.
+	m = send(t, m, special(tea.KeyEsc))
+	m = send(t, m, special(tea.KeyDown))
+	if got := m.jobsTable.Cursor(); got != 1 {
+		t.Errorf("after esc, down in the jobs pane left the cursor at %d, want 1", got)
 	}
 }
 
@@ -235,11 +294,21 @@ func TestMouseClickSelectsRowAndSwitchesPane(t *testing.T) {
 		t.Fatalf("expected 'abbey' (alphabetically first) selected by default, got %q", got)
 	}
 
-	// Row chrome is 3 lines (border + title + header); Y=4 is the second
-	// data row, which is "greet" once jobs are sorted alphabetically.
-	m = send(t, m, tea.MouseMsg{X: 5, Y: 4, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	// Row chrome is 2 lines — the box's top border, then the table header —
+	// because the pane title lives inside the border rule rather than on a
+	// content row of its own. So Y=2 is the first data row and Y=3 the
+	// second, which is "greet" once jobs are sorted alphabetically.
+	m = send(t, m, tea.MouseMsg{X: 5, Y: 3, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
 	if got := m.selectedJobID(); got != "greet" {
 		t.Fatalf("click should have selected 'greet' (2nd row), got %q", got)
+	}
+
+	// The first data row must be clickable at all: while rowAtY still
+	// assumed a title row, Y=2 mapped to index -1 and was discarded, so
+	// the top entry in every table simply could not be selected by mouse.
+	m = send(t, m, tea.MouseMsg{X: 5, Y: 2, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	if got := m.selectedJobID(); got != "abbey" {
+		t.Fatalf("clicking the first data row should select 'abbey', got %q", got)
 	}
 	if m.focus != focusJobs {
 		t.Fatalf("clicking in the jobs pane's x-range should focus it, got %v", m.focus)
@@ -258,7 +327,7 @@ func TestMouseClickSelectsRowAndSwitchesPane(t *testing.T) {
 	// Log spans the full width below jobs/runs now (not a third column to
 	// the right of them) — a click there needs Y past topBoxHeight, X is
 	// irrelevant.
-	m = send(t, m, tea.MouseMsg{X: 5, Y: m.topBoxHeight + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	m = send(t, m, tea.MouseMsg{X: 5, Y: m.topBoxHeight + 1, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
 	if m.focus != focusLog {
 		t.Fatalf("clicking below the top row should focus the log pane, got %v", m.focus)
 	}
@@ -359,16 +428,45 @@ func TestMouseClickOutOfRangeIsIgnoredNotACrash(t *testing.T) {
 // real terminal app is likely to run at.
 func TestNarrowTerminalDoesNotOverflow(t *testing.T) {
 	st, logsDir := seedStore(t)
-	for _, width := range []int{172, 90, 60, 45, 40} {
+	for _, size := range []struct{ w, h int }{
+		{172, 40}, {120, 40}, {100, 30}, {90, 40}, {80, 24},
+		{70, 20}, {60, 20}, {50, 24}, {45, 24}, {40, 20}, {30, 20}, {24, 12},
+	} {
 		m := newModel(st, logsDir)
-		m = send(t, m, tea.WindowSizeMsg{Width: width, Height: 90})
+		m = send(t, m, tea.WindowSizeMsg{Width: size.w, Height: size.h})
 		m = resolve(t, m, m.Init())
 
-		if got := m.jobsBoxWidth + m.runsBoxWidth; got > width {
-			t.Fatalf("at terminal width %d: jobs+runs boxes total %d, wider than the terminal itself", width, got)
+		// No single box may be wider than the terminal, in any layout.
+		for _, box := range []struct {
+			name  string
+			width int
+		}{
+			{"jobs", m.jobsBoxWidth},
+			{"runs", m.runsBoxWidth},
+			{"log", m.logVP.Width + 4},
+		} {
+			if box.width > size.w {
+				t.Fatalf("at %dx%d: %s box is %d wide, wider than the terminal",
+					size.w, size.h, box.name, box.width)
+			}
 		}
-		if m.logVP.Width+4 > width {
-			t.Fatalf("at terminal width %d: log box width %d, wider than the terminal itself", width, m.logVP.Width+4)
+		// Side by side only in the wide layout; the others stack, where
+		// each box legitimately spans the full width on its own row.
+		if m.mode == layoutWide {
+			if got := m.jobsBoxWidth + m.runsBoxWidth; got > size.w {
+				t.Fatalf("at %dx%d: jobs+runs share a row but total %d, wider than the terminal",
+					size.w, size.h, got)
+			}
+		}
+
+		// The rendered frame itself must also fit, which is the thing the
+		// user actually sees — box arithmetic can be right while the
+		// render still spills (that mismatch is the bug this guards).
+		for i, line := range strings.Split(m.View(), "\n") {
+			if w := lipgloss.Width(line); w > size.w {
+				t.Fatalf("at %dx%d: rendered line %d is %d columns wide, past the right edge: %q",
+					size.w, size.h, i, w, ansiRE.ReplaceAllString(line, ""))
+			}
 		}
 	}
 }
@@ -383,7 +481,10 @@ func TestMouseWheelMovesJobSelection(t *testing.T) {
 	if got := m.selectedJobID(); got != "abbey" {
 		t.Fatalf("expected 'abbey' selected by default, got %q", got)
 	}
-	m = send(t, m, tea.MouseMsg{X: 5, Y: 10, Button: tea.MouseButtonWheelDown})
+	// Y must land inside the jobs pane, which is now sized to its content
+	// (two jobs here) rather than a fixed fraction of the screen — a wheel
+	// event further down belongs to the log pane and scrolls that instead.
+	m = send(t, m, tea.MouseMsg{X: 5, Y: 2, Button: tea.MouseButtonWheelDown})
 	if got := m.selectedJobID(); got != "greet" {
 		t.Fatalf("wheel-down should move selection to 'greet', got %q", got)
 	}

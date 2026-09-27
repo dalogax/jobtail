@@ -241,6 +241,15 @@ func scanJob(row *sql.Row) (Job, error) {
 	return j, nil
 }
 
+// ListJobs is the dashboard's per-refresh job query, so its three correlated
+// subqueries are worth a note: they look like the textbook case for a single
+// grouped LEFT JOIN over runs, and that rewrite was written, verified to
+// produce identical results, benchmarked — and thrown away for being twice as
+// slow (1.73 ms vs 0.86 ms at 50 jobs x 200 runs; see
+// BenchmarkListJobs). idx_runs_job(job_id, started_at DESC) turns each
+// subquery into an index seek or a covered range scan, while GROUP BY has to
+// scan every run row and materialize a temporary b-tree to join back. Don't
+// "fix" this without measuring it.
 func (s *Store) ListJobs(ctx context.Context) ([]JobSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT j.id, j.kind, j.cron, j.timezone, j.enabled, j.cwd, j.command, j.prompt, j.model, j.provider,

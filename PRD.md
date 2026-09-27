@@ -213,7 +213,7 @@ OpenCode itself moved off Go/Bubble Tea to **OpenTUI** — a Zig-compiled render
 
 Decision: **Bubble Tea**, because jobtail's UI is closer to `lazygit`/`k9s` (static-ish structured panes, not a live-rendered chat stream) and a single dependency-free binary matters for something a systemd timer and a Herdr tab both need to launch reliably. OpenTUI would be the right call if this were being built in TS/Bun already or needed OpenTUI's rendering headroom — revisit if either becomes true.
 
-Jobs and runs side by side on top, log spanning the full width underneath — not three columns side by side. Chosen over an even three-way split after actually using it: the log is where the real content lives (command output, agent transcripts), so it gets the width and gets it below the (usually short) job/run lists rather than squeezed into a third column. Herdr tab (opened per §8 — either a plain `jobtail tui` in a manually-created tab, or via the optional plugin's keybinding), Bubble Tea (`charmbracelet/bubbletea` + `bubbles` table/viewport + `lipgloss`), pattern deliberately close to `lazygit`/`k9s` since that's already muscle memory here.
+Jobs and runs side by side on top, log spanning the full width underneath — not three columns side by side — on a terminal wide enough for it; see §15 for the stacked and single-pane layouts smaller terminals get. Chosen over an even three-way split after actually using it: the log is where the real content lives (command output, agent transcripts), so it gets the width and gets it below the (usually short) job/run lists rather than squeezed into a third column. Herdr tab (opened per §8 — either a plain `jobtail tui` in a manually-created tab, or via the optional plugin's keybinding), Bubble Tea (`charmbracelet/bubbletea` + `bubbles` table/viewport + `lipgloss`), pattern deliberately close to `lazygit`/`k9s` since that's already muscle memory here.
 
 ```
 ┌─ Jobs ────────────────────────────────┬─ Runs: nightly-deps ──────────────────┐
@@ -229,7 +229,7 @@ Jobs and runs side by side on top, log spanning the full width underneath — no
   h/l or arrows/enter/esc: move · e enable/disable · r run now · q quit
 ```
 
-- **Jobs pane** (top-left): `●`/`○` = enabled/disabled, type badge, run count. Row color = last status (green ok / red failed / yellow running / grey never-run).
+- **Jobs pane** (top-left): `●`/`○` = enabled/disabled, type badge, run count. Status color = last status (green ok / red failed / yellow running / grey never-run) — applied to the status cell, within the width constraint documented in §15.
 - **Runs pane** (top-right): for the selected job, newest first; status glyph, start time, duration, trigger badge (S/M for scheduled/manual).
 - **Log pane** (bottom, full width): for the selected run. `cli` jobs render the raw log as a scrolling text viewport. `agent` jobs parse the `stream-json` lines and render them the way a transcript reads — assistant text, tool calls with their input, tool results collapsed by default (expandable), final result/cost line — not raw JSON by default (raw available via a `J` toggle for debugging).
 - Live tail: if the selected run's `status='running'`, the log pane tails the file (`fsnotify`/poll) instead of a static read.
@@ -313,3 +313,127 @@ Every provider's invocation and JSON event shape below was checked directly agai
 `resume`'s interactive command is provider-aware too (`cmd_run.go`'s `resumeCommand`), each verified against that binary's own `--help`: `claude --resume <id>`, `opencode --session <id>` (opens the interactive TUI on that session — its `run --session` counterpart is non-interactive), `codex resume <id>` (the top-level, interactive `resume` — distinct from the non-interactive `codex exec resume`).
 
 **A real, incidental bug found while verifying this**: on this mise-managed box, the resolved `claude`/`opencode`/`codex` binaries are mise shims that print `mise ~/.config/mise/config.toml tools: <tool>@<version>` to stderr before delegating — which was landing verbatim in captured logs and leaking into rendered transcripts (exactly the raw-noise §9 exists to prevent). Fixed by setting `MISE_QUIET=1` on every command execengine spawns (`childEnv()`), for all job kinds, not just agent jobs — scoped to jobtail's own child processes only, never the user's interactive shell or mise generally.
+
+## 15. Responsive layout
+
+The TUI was built and tuned at one terminal size (a wide one) and quietly fell apart below it. A pass rendering the real dashboard through a pty at a dozen real sizes, against the real database and against 21-job/long-id/empty fixtures, found that it stopped conveying anything well before "narrow":
+
+- At **80×24** — an ordinary terminal, not an edge case — the jobs pane read `● ha-fr…  c…  …  09…  ok`. Every column got a proportional share of a width that couldn't support any of them, so even the *headers* were truncated (`Ki…`, and a `Runs` column collapsed to a bare `…`, occupying space while conveying nothing). At 45 columns and below the panes were ellipses end to end.
+- The **help bar was cropped by Bubble Tea**, silently: at 80 columns `q quit` was gone entirely, so nothing on screen said how to exit; at 60 it cut mid-word (`e enable/dis`).
+- The top row took a **flat 40% of the height whatever it held** — showing 6 of 21 jobs, with no indication the other 15 existed, above a log pane that was empty.
+- An **empty database** rendered as three blank boxes: the first thing a new user sees, with no hint of what to do next.
+- Pane **titles vanished** rather than shortening when the border couldn't hold them, so at 50 columns the runs pane had a blank top rule and nothing named the job whose runs were listed.
+- `statusStyle` and the four status colors had been written but **never called** — the dashboard's single most important signal, *did it fail*, rendered in the same plain text as everything else.
+- `rowAtY` still assumed the pane title occupied a content row after the btop restyle moved it into the border, so **every mouse click resolved one row too high** and the first row of each table could not be clicked at all.
+
+### Design
+
+**Three layouts, chosen by terminal size** (`modeFor`). The dashboard's interaction model is already a drill-down — jobs → runs → log, `enter`/`l` forward and `esc`/`h` back — so the narrow layout doesn't invent a second mental model, it just stops drawing the levels you aren't looking at.
+
+| Mode | When | Arrangement |
+|---|---|---|
+| `layoutWide` | ≥ 100 cols and ≥ 18 rows | jobs \| runs side by side, log full width below |
+| `layoutStacked` | ≥ 56 cols and ≥ 20 rows | all three full width, stacked |
+| `layoutFocused` | anything smaller | the focused pane only, filling the screen |
+
+The 100-column breakpoint is derived, not round: the jobs table's columns need ~38 columns of content to stop being stumps, plus 2 padding per column and 4 of box chrome — about 52 per pane, so two honest panes side by side need ~104.
+
+**Columns are dropped whole, not squeezed** (`fitColumns`). Each `colSpec` carries a `min` (the narrowest width at which it still reads as itself — a timestamp needs 11 for `09-27 13:30`; less is a lie), a `max` (past which it just pushes its neighbors around; `0` = unbounded, marking the column that absorbs the leftover), a `grow` weight, and a `drop` priority. When the width isn't there the worst-priority column leaves rather than starving the rest. Job ID and run status are the two things the panes exist to answer and are the last to give ground; run counts and cron expressions are the first to go. Three columns you can read beat five you can't.
+
+**Spare width buys information, not padding.** The same mechanism runs in reverse: a wide jobs table gains a `Cron` column, a wide runs table an `Exit` one. A column that hits its `max` returns its surplus to the pot, so fixed-width content (a timestamp, a kind) never inflates into dead space while the ID column is still truncating. In the wide layout the runs pane is sized to what its columns can actually use and the jobs pane takes everything else — an even split spent half the terminal padding timestamps while truncating the names beside them.
+
+**Panes are sized to their contents** (`topRowHeight`, `stackedHeights`), capped so none starves the others, with the focused pane getting first claim on the remainder. The jobs list drives the top row's height rather than the runs list, because run history is unbounded — letting it decide would peg the row at its cap permanently, which is the old fixed split by another name.
+
+**Status color, within a measured constraint.** `bubbles/table` v1.0.0 truncates cells with `go-runewidth`, which is not ANSI-aware: it measures `"\x1b[31mfailed\x1b[0m"` as 13 columns rather than the 6 a terminal shows. Measured against the real widget rather than assumed — below that 13 it cuts mid-escape, mangling the text (`failed` → `f…`) *and* swallowing the reset so the color bleeds across the row; at ≥ 13 the string passes through untouched and the row's visible width still comes out exactly right. So `colorCell` colors a status only when the column can pay for the escape bytes too, and falls back to plain text otherwise. Narrow terminals lose the color, never the text. This is why a status column's `max` is `statusColorWidth` (15 + 9) rather than the width of its longest word.
+
+**Everything else that was cropping now fits itself**: the help bar shortens its labels then drops hints worst-first (quitting never drops) and is tailored to the focused pane, since `e` and `r` only ever acted on the jobs table and advertising them while reading a log was a promise the UI didn't keep; pane titles shorten instead of disappearing; list panes carry a `3/21` position so hidden rows announce themselves, and the log pane a scroll percentage; an empty database names the command that fixes it, choosing a shorter phrasing rather than being clipped when the box is small.
+
+Regression coverage lives in `internal/tui/responsive_test.go` and asserts on the **rendered frame** across a dozen sizes — no pane may render as mostly ellipses, no rendered line may exceed the terminal width, the help bar must always say how to quit, the job id must survive, every title must appear. The previous tests all passed throughout the broken period because they checked box arithmetic and absence of crashes; nothing looked at what was actually on screen.
+
+## 16. Performance and footprint
+
+Benchmarked before optimizing, then again after; both sets of numbers came from the real binary, a real SQLite file and — for the dashboard — a real pty, on an i5-1145G7.
+
+### What the tool actually costs
+
+The CLI is not where jobtail spends its life. Every subcommand starts, does one thing and exits in about 3 ms:
+
+| Invocation | Wall | Peak RSS |
+|---|---|---|
+| `jobtail --version` (no database) | 2.1 ms | 13.8 MiB |
+| `jobtail tick` (the once-a-minute timer) | 3.3 ms | 17.7 MiB |
+| `jobtail list --json` | 3.3 ms | 18.5 MiB |
+
+`store.Open` accounts for 0.23 ms of that, most of the rest being Go runtime start and cobra building its command tree. Nothing here was worth touching, and `tick` in particular is already lean: one `EnabledJobs` query, one indexed `LastRun` per job, and a subprocess only for jobs that are actually due.
+
+The dashboard is the opposite: a process people leave open in a tab for hours, whose cost is paid whether or not anyone is looking. That is where all of it was.
+
+### The dashboard was burning CPU to produce identical frames
+
+An open, untouched dashboard cost **31.5 ms of CPU per second** against a 12-job store with a 256 KB agent transcript selected — and **105 ms/s**, a tenth of a core, when that transcript was 2 MB. Over the same interval it wrote **0 bytes to the terminal**, because every frame it computed was byte-identical to the one already on screen and Bubble Tea's renderer discarded it.
+
+The refresh ran the whole pipeline once a second regardless of whether anything had changed: two queries, a full file read, a JSON parse of the entire transcript, a re-wrap, a row rebuild, a re-layout, four frame renders. Yet jobs only change when someone edits one, runs only when one starts or finishes, and a finished run's log never changes at all.
+
+Worse, the guard that was supposed to limit the log work didn't. The tick only asked for a log reload when the selected run was still running — but the *runs* reload, which happened every tick, unconditionally asked for one too, so the expensive path ran every second for every run, finished or not.
+
+### Refreshes that change nothing now cost nothing
+
+The lever is that Bubble Tea's event loop drops a command whose `Msg` is nil before anything happens (`tea.go`: `if msg == nil { continue }`) — no `Update`, no row rebuild, no re-layout, and no frame render. So each reload command is handed what its pane is already showing and answers "nothing new" with nil:
+
+- **Jobs and runs** compare the query result against the loaded slice with `slices.Equal`. `store.JobSummary` and `store.Run` are strictly comparable, and every field comes from the same parse path, so equal content is exactly equal structs. Comparing the whole struct rather than the displayed fields keeps behaviour identical: `selectedJob` hands `Cwd`/`Command`/`Prompt` to "run now", so a job edited from another terminal must still take effect.
+- **The log** is decided by a `stat` alone, against the run id, size and mtime of the bytes on display. Run logs are append-only, so those settle it, and an unchanged file is never read, never re-parsed and never re-wrapped.
+- **`layout()`** compares a `layoutKey` of everything it reads (size, focus, row counts) and returns immediately when the screen hasn't changed shape. Reload messages arrive far more often than the geometry moves, and each blind re-layout pushed fresh columns and widths into both tables — an `UpdateViewport` apiece — plus a full row rebuild, to arrive at the same numbers.
+
+Two more fixes, both of them removing redundant work rather than trading anything away:
+
+- **`wrapForViewport` no longer pads.** It called `lipgloss.Style.Width().Render()`, whose wrapping is exactly `cellbuf.Wrap` — but whose remaining work padded *every* line out to the full pane width, 4.3 MB of allocation per call on a 256 KB transcript. `viewport.View` already pads what it shows to its own width, so all of that padding was producing lines nobody would ever see. Calling `cellbuf.Wrap` directly keeps the wrapping and drops the rest.
+- **`cronx.loadLocation` memoizes `time.LoadLocation`,** which caches nothing but `UTC` and `Local` and re-reads the zoneinfo file on every call. A job on an IANA timezone cost 5.3 µs per `Next` against 0.93 µs for a local one, all of the difference being that read — and `Next` is called for every enabled job every tick, and for every job each time the jobs table is rebuilt.
+
+Because the log is only touched when it changes, the dashboard's cost also stopped scaling with log size:
+
+| Dashboard, idle | Before | After | |
+|---|---|---|---|
+| 172×40, 200 runs, 256 KB log | 31.5 ms/s | **6.2 ms/s** | 5.1× |
+| 172×40, 60 runs, **2 MB log** | 105.2 ms/s | **5.5 ms/s** | **19×** |
+| 80×24, 200 runs, 256 KB log | 26.7 ms/s | **6.0 ms/s** | 4.5× |
+| Peak RSS, 2 MB log | 43.4 MiB | **33.1 MiB** | −24% |
+
+At the benchmark level, one refresh tick went from 17.1 ms / 8.6 MB / 49,262 allocs to 2.5 ms / 0.6 MB / 6,145 allocs, and `layout()` from 1.35 ms / 10,546 allocs to 242 ns / 0 allocs.
+
+### Renderer framerate: 60 → 30 FPS
+
+An *empty* database still cost 8 ms/s, all of it Bubble Tea's renderer waking 60 times a second to check whether there was a new frame to write. At 30 FPS that is 4.8 ms/s, at 15 FPS 3.1 ms/s.
+
+30 is the deliberate stopping point. This is the one knob here that trades against feel rather than removing waste — the renderer is also what puts a keystroke on screen, so the framerate *is* the worst-case input latency. 33 ms is imperceptible and stays smooth under held-key scrolling; 15 FPS (67 ms) starts to be noticeable. Nothing the dashboard displays changes faster than the 1 Hz refresh, so no content update can tell 30 from 60.
+
+### Binary size: 14 MiB, and why it stays there
+
+Measured by building each dependency layer on its own:
+
+| Layer | Cumulative | Marginal |
+|---|---|---|
+| Go runtime floor (`func main` printing one line) | 1.16 MiB | — |
+| + Bubble Tea, bubbles, lipgloss, cobra | 3.00 MiB | 1.84 MiB |
+| + `modernc.org/sqlite` | 6.70 MiB | **3.70 MiB** |
+| + `net/http` over TLS | 10.25 MiB | **3.55 MiB** |
+| jobtail (its own code, `encoding/json`, the rest) | 13.95 MiB | 3.70 MiB |
+
+The two biggest items are both features, not accidents. `modernc.org/sqlite` is a SQLite transliterated into Go, and it is what makes the cgo-free static binary cross-compile to four platforms from one runner with no toolchain (PRD §12) — the cgo alternative is smaller and gives all of that up. The HTTPS stack is `jobtail upgrade` and the update-available notice. Neither is worth trading for megabytes, so the only size change here is `-trimpath` in the release build: about 53 KB, and the same source now produces the same bytes.
+
+For reference, the 32 MiB `crypto/internal/fips140/drbg.memory` symbol that dominates a naive `go tool nm` listing is BSS — address space, not file, and not resident until touched.
+
+### One correctness bug the benchmarking found
+
+`bubbles/table`'s `Update` returns immediately unless the table is focused. Only the jobs table ever was — the runs table was built with `WithFocused(false)` and nothing called `Focus` when the pane changed — so **↑/↓ in the runs pane did nothing at all**, while the help bar advertised "↑↓ move". The mouse hid it completely, because the wheel and click paths call `MoveUp`/`MoveDown`/`SetCursor` directly and never go through `table.Update`. `setFocus` now keeps the two in step; focus doesn't affect how a selected row is drawn, so no frame changed.
+
+### A rewrite that was measured and rejected
+
+`ListJobs` runs three correlated subqueries per job, which looks like the textbook case for a single grouped `LEFT JOIN` over runs. That rewrite was written, verified to return identical results, benchmarked, and thrown away: it is **twice as slow** (1.73 ms vs 0.86 ms at 50 jobs × 200 runs). `idx_runs_job(job_id, started_at DESC)` turns each subquery into an index seek or a covered range scan, while `GROUP BY` must scan every run row and materialize a temporary b-tree to join back.
+
+### Keeping it honest
+
+- `internal/tui/bench_test.go` — `BenchmarkRefreshTick` is the headline: one second of an idle dashboard, end to end, with the pieces (`View`, `layout`, transcript render, wrap, row build) broken out so a regression can be attributed rather than merely noticed.
+- `internal/store/bench_test.go` — the two per-refresh queries and the per-invocation `Open`, across dataset shapes from a fresh install to one at its retention ceiling.
+- `internal/cronx/cronx_bench_test.go` — keeps the local/IANA gap closed.
+- `internal/tui/refresh_test.go` — the safety net for all of the above. A refresh that skips work must never skip a *change*: a run appearing, a run finishing (which moves no row counts), a job toggled from another process, a log being appended to, a resize needing a re-wrap, two runs whose logs are the same size, a failing query still surfacing its error. One test asserts the skipping happens at all, so the others can't be satisfied by simply reloading everything again.
+- `scripts/bench.sh` — binary size, per-invocation wall time and peak RSS, and the dashboard's steady state via `scripts/bench_tui.py`, which drives the real binary in a real pty. CPU there comes from `wait4` rusage in microseconds, with startup cancelled by differencing two run lengths; `/proc/<pid>/stat` counts in 10 ms ticks (too coarse) and `/proc/<pid>/schedstat` reads near-zero unless `sched_schedstats` is on.
