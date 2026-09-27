@@ -1,0 +1,27 @@
+cmd/jobtail/cmd_job.go
+  s_9546586a2895d6::t_eeb69d48478d00 95,97,148,171-172,261-264,363,365,417-420,435-436
+internal/execengine/execengine.go
+  s_9546586a2895d6::t_e15b6219b752ae 7,11,107,125-179,204,304,393
+internal/runner/runner.go
+  s_9546586a2895d6::t_6533807cf5beb8 13,21-26,28-41,54-94
+internal/store/store.go
+  s_9546586a2895d6::t_08cd7745f33e92 72-84,138-144,213-215,219-220,227-228,236-237,240-241,255-256,279-281,295-296,298-300,311-312,389-390,431-436,439,443,499-500
+internal/tui/tui.go
+  s_9546586a2895d6::t_af58d20d77f6da 1425-1426,1439-1440
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "884de9f888d6c6c80f8aad7f95a46abadcfd2d52",
+  "prompts": {},
+  "sessions": {
+    "s_9546586a2895d6": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f27918b40ffeo0d4XToMgiIlgW",
+        "model": "unknown"
+      },
+      "human_author": "Daniel López García <daniellgarc@inditex.com>"
+    }
+  }
+}
