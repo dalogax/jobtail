@@ -1,0 +1,18 @@
+internal/tui/log_title_test.go
+  h_e3d1ad069ecc4d 1-84
+internal/tui/tui.go
+  h_e3d1ad069ecc4d 1514,1524-1566
+internal/tui/tui_test.go
+  h_e3d1ad069ecc4d 257-265
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e3ed171fa01203486d1d6c1f41b5320cc91aaa9f",
+  "prompts": {},
+  "humans": {
+    "h_e3d1ad069ecc4d": {
+      "author": "Daniel López García <daniellgarc@inditex.com>"
+    }
+  }
+}
