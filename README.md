@@ -100,7 +100,9 @@ Nothing agent-specific needs a special environment: give it a prompt and a worki
 A few things exist specifically because the job is an agent, not a shell command:
 
 - **Readable transcripts, not raw JSON.** The log pane parses each provider's own event stream and shows assistant text, tool calls (with their input), and the final result — not a wall of `{"type":"assistant",...}`.
-- **Session capture + resume.** Every agent run's session (or, for codex, thread) id is captured as soon as it starts, even if the run later fails. `jobtail resume <run-id>` hands a failed run to an interactive session in the same CLI that produced it (`claude --resume`, `opencode --session`, or `codex resume`), so you can pick up exactly where an unattended run got stuck instead of starting over.
+- **Session capture + resume.** Every agent run's session (or, for codex, thread) id is captured as soon as it starts, even if the run later fails. Select a run in the dashboard and press **`r`** — or use `jobtail resume <run-id>` — to reopen that exact session interactively in the CLI that produced it (`claude --resume`, `opencode --session`, or `codex resume`), so you can pick up where an unattended run got stuck instead of starting over. Reading a run's log and deciding to continue it by hand is one keypress.
+
+  Resuming means the agent CLI keeps its own session transcript on disk (for claude, under `~/.claude/projects/`), so scheduled agent runs will accumulate there and show up in that tool's own session picker. `jobtail gc` prunes jobtail's runs and logs, not another tool's session store.
 - **A sane default permission mode.** Unattended `claude`/`codex` runs default to `acceptEdits`/`workspace-write` respectively — auto-accepts file edits, never `bypassPermissions`/`danger-full-access` unless a job explicitly opts in via `--permission-mode` (its meaning is provider-specific — see `jobtail add --help`). (Avoid `--permission-mode plan` for scheduled `claude` jobs: it expects an interactive approval that headless mode can never provide, and the run will just hang.)
 
 This isn't tied to any particular terminal or workflow — it works the same whether you're driving it from a plain SSH session, tmux, or nothing open at all (the timer doesn't need a terminal to fire).
@@ -132,7 +134,7 @@ The precheck's output is always written to the run's log, whatever it decided, s
 [Herdr](https://herdr.dev) is a terminal workspace manager built around AI coding agent panes. jobtail isn't a Herdr plugin and doesn't need one — `jobtail` is just a command that runs fine in any tab or pane, Herdr's included. If you do use Herdr, two things light up automatically:
 
 - A failed run triggers a `herdr notification`, if `herdr` is on `PATH` — a desktop toast even if you're not looking at the dashboard.
-- `jobtail resume` opens the resumed session in a new Herdr tab (`herdr tab create` + `herdr pane run`) instead of just printing instructions.
+- Resuming a run — `r` in the dashboard, or `jobtail resume` — opens the session in a new Herdr tab (`herdr tab create` + `herdr pane run`) instead of just printing instructions.
 
 Neither requires any setup — jobtail detects `herdr` on `PATH` at the moment it'd be useful and silently skips both if it's not there.
 
@@ -145,7 +147,7 @@ jobtail show <id>          Show one job's detail and recent runs
 jobtail runs <id>          List run history for one job
 jobtail log <run-id>       Dump one run's log to stdout
 jobtail run <id>           Manually trigger a job now and wait for it to finish
-jobtail resume <run-id>    Hand a failed agent run to an interactive session
+jobtail resume <run-id>    Reopen an agent run's session interactively (also `r` in the dashboard)
 jobtail enable/disable <id>  Pause or resume a job without deleting it
 jobtail edit <id>           Change one or more fields of an existing job
 jobtail rm <id>             Delete a job and its run history

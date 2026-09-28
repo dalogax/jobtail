@@ -21,6 +21,7 @@ import (
 
 	"github.com/dalogax/jobtail/internal/cronx"
 	"github.com/dalogax/jobtail/internal/execengine"
+	"github.com/dalogax/jobtail/internal/resume"
 	"github.com/dalogax/jobtail/internal/runner"
 	"github.com/dalogax/jobtail/internal/store"
 )
@@ -290,6 +291,7 @@ type model struct {
 	err           error
 	statusMsg     string
 	running       map[string]bool // job IDs with an in-flight "run now" from the TUI
+	resuming      map[string]bool // run IDs with a Herdr tab already opening
 
 	// Geometry, all set by layout() and read by both View() and mouse
 	// hit-testing — the two must never re-derive it independently, which
@@ -375,6 +377,7 @@ func newModel(st *store.Store, logsDir string) model {
 		jobsCols:  jobCols,
 		runsCols:  runCols,
 		running:   map[string]bool{},
+		resuming:  map[string]bool{},
 	}
 }
 
@@ -525,6 +528,23 @@ func runNowCmd(ctx context.Context, st *store.Store, j store.Job, logsDir string
 	}
 }
 
+// resumedMsg reports the outcome of handing a run to an interactive
+// session. Opening a Herdr tab shells out twice and so must not happen on
+// the Update goroutine — a slow or wedged herdr would freeze the dashboard
+// rather than the resume.
+type resumedMsg struct {
+	runID  string
+	paneID string
+	err    error
+}
+
+func resumeCmd(j store.Job, r store.Run) tea.Cmd {
+	return func() tea.Msg {
+		paneID, err := resume.Open(j, r)
+		return resumedMsg{runID: r.ID, paneID: paneID, err: err}
+	}
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -607,6 +627,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusMsg = fmt.Sprintf("run finished for %s", msg.jobID)
 		delete(m.running, msg.jobID)
 		return m, m.reloadJobs()
+
+	case resumedMsg:
+		delete(m.resuming, msg.runID)
+		if msg.err != nil {
+			// Shown in the help bar, not set on m.err: m.err is for the
+			// dashboard being unable to do its job, and a resume that
+			// didn't open is a failed action, not a broken dashboard.
+			m.statusMsg = fmt.Sprintf("resume failed: %v", msg.err)
+			return m, nil
+		}
+		m.statusMsg = fmt.Sprintf("resumed in pane %s", msg.paneID)
+		return m, nil
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -1065,6 +1097,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.focus == focusJobs {
 			return m.runSelectedNow()
 		}
+		// In the runs and log panes the selection is a run, not a job, so
+		// "r" means the run-shaped version of "run it": pick this agent
+		// session back up interactively.
+		return m.resumeSelectedRun()
 	}
 
 	var cmd tea.Cmd
@@ -1282,6 +1318,61 @@ func (m *model) selectJobByID(id string) {
 	}
 }
 
+// selectedRunRow is the whole selected run, where selectedRun returns only
+// the two fields the log pane needs. Resuming needs the session id too.
+func (m model) selectedRunRow() *store.Run {
+	idx := m.runsTable.Cursor()
+	if idx < 0 || idx >= len(m.runs) {
+		return nil
+	}
+	return &m.runs[idx]
+}
+
+// jobForRun finds the job a run belongs to by the run's own JobID rather
+// than trusting the jobs cursor. The two disagree for a moment every time
+// the selection moves: the runs on screen still belong to the previously
+// selected job until the load answering the change arrives (see runsJobID).
+func (m model) jobForRun(r *store.Run) *store.Job {
+	if r == nil {
+		return nil
+	}
+	for i := range m.jobs {
+		if m.jobs[i].Job.ID == r.JobID {
+			return &m.jobs[i].Job
+		}
+	}
+	return nil
+}
+
+// canResumeSelection decides whether to advertise "r resume" at all, so the
+// key is only offered where it does something (see hintsFor).
+func (m model) canResumeSelection() bool {
+	r := m.selectedRunRow()
+	j := m.jobForRun(r)
+	return j != nil && resume.Possible(*j, *r)
+}
+
+func (m model) resumeSelectedRun() (tea.Model, tea.Cmd) {
+	r := m.selectedRunRow()
+	if r == nil {
+		return m, nil
+	}
+	j := m.jobForRun(r)
+	if j == nil {
+		return m, nil
+	}
+	if why := resume.Reason(*j, *r); why != "" {
+		m.statusMsg = "cannot resume: " + why
+		return m, nil
+	}
+	if m.resuming[r.ID] {
+		return m, nil // already opening a tab for this run
+	}
+	m.resuming[r.ID] = true
+	m.statusMsg = "resuming..."
+	return m, resumeCmd(*j, *r)
+}
+
 func (m model) selectedRun() (id string, logPath string) {
 	idx := m.runsTable.Cursor()
 	if idx < 0 || idx >= len(m.runs) {
@@ -1488,7 +1579,7 @@ func (m model) View() string {
 			m.logPane(m.height-1-m.topBoxHeight))
 	}
 
-	return body + "\n" + renderHelpBar(m.width, m.focus, m.statusMsg)
+	return body + "\n" + renderHelpBar(m.width, m.focus, m.statusMsg, m.canResumeSelection())
 }
 
 func (m model) jobsPane(boxHeight int) string {
@@ -1795,21 +1886,37 @@ type helpHint struct {
 // simply wrong. It also said "esc back" on the jobs pane, where there is
 // nothing to go back to, and "enter open" on the log pane, where there is
 // nothing deeper to open.
-func hintsFor(focus focusPane) []helpHint {
+// canResume follows the same rule: "r resume" only acts on an agent run
+// that captured a session id, so a cli job's runs — or an agent run that
+// died before its session id arrived — must not advertise it.
+func hintsFor(focus focusPane, canResume bool) []helpHint {
+	// Dropped first of the pane's real hints: useful, but the one you can
+	// most afford to lose on a narrow terminal.
+	resumeHint := helpHint{key: "r", long: "resume session", short: "resume", drop: 4}
 	switch focus {
 	case focusRuns:
-		return []helpHint{
+		hints := []helpHint{
 			{key: "↑↓", long: "move", short: "move", drop: 3},
 			{key: "enter", long: "open log", short: "log", drop: 2},
-			{key: "esc", long: "back", short: "back", drop: 1},
-			{key: "q", long: "quit", short: "quit", drop: 0},
 		}
+		if canResume {
+			hints = append(hints, resumeHint)
+		}
+		return append(hints,
+			helpHint{key: "esc", long: "back", short: "back", drop: 1},
+			helpHint{key: "q", long: "quit", short: "quit", drop: 0},
+		)
 	case focusLog:
-		return []helpHint{
+		hints := []helpHint{
 			{key: "↑↓", long: "scroll", short: "scroll", drop: 2},
-			{key: "esc", long: "back", short: "back", drop: 1},
-			{key: "q", long: "quit", short: "quit", drop: 0},
 		}
+		if canResume {
+			hints = append(hints, resumeHint)
+		}
+		return append(hints,
+			helpHint{key: "esc", long: "back", short: "back", drop: 1},
+			helpHint{key: "q", long: "quit", short: "quit", drop: 0},
+		)
 	default:
 		return []helpHint{
 			{key: "↑↓", long: "move", short: "move", drop: 4},
@@ -1829,8 +1936,8 @@ func hintsFor(focus focusPane) []helpHint {
 // columns — at 80 the "q quit" hint was gone entirely (so nothing on screen
 // said how to exit), and at 60 it cut mid-word to "e enable/dis". Hints now
 // shorten, then drop whole, worst-priority first.
-func renderHelpBar(width int, focus focusPane, statusMsg string) string {
-	hints := hintsFor(focus)
+func renderHelpBar(width int, focus focusPane, statusMsg string, canResume bool) string {
+	hints := hintsFor(focus, canResume)
 	key := func(k, desc string) string {
 		return helpKeyStyle.Render(k) + helpStyle.Render(" "+desc)
 	}

@@ -157,7 +157,8 @@ jobtail run nightly-deps           # manual trigger, trigger='manual', fresh ses
 jobtail resume <run-id>            # agent runs only: opens an interactive Herdr tab
                                    # attached to that run's provider (claude --resume /
                                    # opencode --session / codex resume), seeded from
-                                   # the run's captured session id — see §14
+                                   # the run's captured session id — see §14, §20.
+                                   # Also on `r` in the dashboard's runs/log panes
 
 # plumbing
 jobtail tick                       # called by the systemd timer; not for interactive use
@@ -248,13 +249,13 @@ Jobs and runs side by side on top, log spanning the full width underneath — no
 ```sh
 claude -p "<prompt>" \
   --output-format stream-json \
+  --verbose \
   --add-dir <cwd> \
   --permission-mode <permission_mode> \
-  --model <model> \
-  --no-session-persistence
+  --model <model>
 ```
 
-from `job.cwd`, streaming stdout line-by-line straight into the run's `.jsonl` log. The first `system`/`init` event in the stream carries the session id — captured into `runs.session_id` as soon as it arrives, so a run that later fails is still resumable via `jobtail resume`. Exit code + the final `result` event's `is_error` field together decide `ok` vs `failed`. `--permission-mode acceptEdits` is the sane default for unattended runs (auto-accepts file edits, still not `bypassPermissions`); `--dangerously-skip-permissions`/`bypassPermissions` is deliberately never the default and only settable explicitly per job for cases that need it (e.g. a fully sandboxed maintenance job). `jobtail resume <run-id>` itself doesn't run headless — it does `herdr tab create` + `pane run <pane> "claude --resume <session_id>"`, handing the failed session to you interactively rather than trying to make unattended retries smart.
+from `job.cwd`, streaming stdout line-by-line straight into the run's `.jsonl` log. The first `system`/`init` event in the stream carries the session id — captured into `runs.session_id` as soon as it arrives, so a run that later fails is still resumable via `jobtail resume`. Note what is *not* in that invocation: `--no-session-persistence`. It was there from the first commit and silently made resuming impossible for every claude job — see §20. Exit code + the final `result` event's `is_error` field together decide `ok` vs `failed`. `--permission-mode acceptEdits` is the sane default for unattended runs (auto-accepts file edits, still not `bypassPermissions`); `--dangerously-skip-permissions`/`bypassPermissions` is deliberately never the default and only settable explicitly per job for cases that need it (e.g. a fully sandboxed maintenance job). `jobtail resume <run-id>` itself doesn't run headless — it does `herdr tab create` + `pane run <pane> "claude --resume <session_id>"`, handing the session to you interactively rather than trying to make unattended retries smart. The same action is on `r` in the dashboard's runs and log panes (§9), which is where you normally are when you decide a run is worth picking up by hand.
 
 Both kinds: `SIGTERM` then `SIGKILL` after a grace period on timeout; run row gets `status='timeout'`. Log capture is capped at 10MB per run (a truncation marker line is appended and the process is left running — capping the *captured* log, not killing a noisy-but-otherwise-fine job) so one runaway `cli` job can't fill the disk.
 
@@ -302,7 +303,7 @@ Every provider's invocation and JSON event shape below was checked directly agai
 
 | Provider | Invocation | Session/thread id | Failure signal |
 |---|---|---|---|
-| `claude` | `claude -p <prompt> --output-format stream-json --verbose --add-dir <cwd> --no-session-persistence --permission-mode <acceptEdits\|...> [--model]` | `session_id` on the `type:"system",subtype:"init"` event | `is_error:true` on the `type:"result"` event, or no result event at all |
+| `claude` | `claude -p <prompt> --output-format stream-json --verbose --add-dir <cwd> --permission-mode <acceptEdits\|...> [--model]` | `session_id` on the `type:"system",subtype:"init"` event | `is_error:true` on the `type:"result"` event, or no result event at all |
 | `opencode` | `opencode run <prompt> --format json [-m <model>]` | top-level camelCase `sessionID`, present on every event from the first line (no distinct init event) | a top-level `type:"error"` event — **process exit code is 0 even then**, confirmed directly by running an invalid-model request; exit-code alone is not trustworthy for this provider |
 | `codex` | `codex exec --json --sandbox <workspace-write\|read-only\|danger-full-access> --skip-git-repo-check [-m <model>] <prompt>` | `thread_id` on the `type:"thread.started"` event | `type:"turn.failed"` or top-level `type:"error"`; confirmed the process reliably exits non-zero on failure (unlike opencode) |
 
@@ -312,7 +313,7 @@ Every provider's invocation and JSON event shape below was checked directly agai
 
 `permission_mode` is reused rather than adding a second provider-specific column: for `claude` it's `acceptEdits`(default)/`bypassPermissions`/`plan`; for `codex` it *is* the `--sandbox` policy (default `workspace-write`, the closest codex equivalent of claude's default — never `danger-full-access` unless a job opts in, mirroring decision 6's "never bypassPermissions unless explicit"); `opencode` doesn't consume it at all (its own `--auto` flag was deliberately left unused — a real run with no such flag still executed a `bash` tool call with no permission prompt or hang, confirmed directly, so the unattended-hang risk that motivates claude's acceptEdits default doesn't appear to apply to opencode's `run` command).
 
-`resume`'s interactive command is provider-aware too (`cmd_run.go`'s `resumeCommand`), each verified against that binary's own `--help`: `claude --resume <id>`, `opencode --session <id>` (opens the interactive TUI on that session — its `run --session` counterpart is non-interactive), `codex resume <id>` (the top-level, interactive `resume` — distinct from the non-interactive `codex exec resume`).
+`resume`'s interactive command is provider-aware too (`internal/resume`'s `Command`), each verified against that binary's own `--help`: `claude --resume <id>`, `opencode --session <id>` (opens the interactive TUI on that session — its `run --session` counterpart is non-interactive), `codex resume <id>` (the top-level, interactive `resume` — distinct from the non-interactive `codex exec resume`).
 
 **A real, incidental bug found while verifying this**: on this mise-managed box, the resolved `claude`/`opencode`/`codex` binaries are mise shims that print `mise ~/.config/mise/config.toml tools: <tool>@<version>` to stderr before delegating — which was landing verbatim in captured logs and leaking into rendered transcripts (exactly the raw-noise §9 exists to prevent). Fixed by setting `MISE_QUIET=1` on every command execengine spawns (`childEnv()`), for all job kinds, not just agent jobs — scoped to jobtail's own child processes only, never the user's interactive shell or mise generally.
 
@@ -539,3 +540,26 @@ The motivating shape is an agent job that should only spend a turn when there is
 It now uses `terminateThenKill`, the same SIGTERM-then-SIGKILL hook the job run paths use. `WaitDelay` is set as well, for a reason specific to this path: the gate's output is captured through a pipe into a buffer (the job paths write to a file descriptor directly), and `Wait` blocks until every writer closes that pipe — including a grandchild the gate left behind, which killing the shell does not reap. The regression test asserts on *elapsed time*, because the reported outcome was already correct while the behaviour was not.
 
 The gate's measured duration is what a skipped or gate-failed run records, rather than the zero a placeholder helper used to return for every one of them.
+
+## 20. Resuming an agent session
+
+An agent run leaves behind a session you can pick back up: the provider's own session/thread id is captured into `runs.session_id` while the run is still going (§14), and `jobtail resume <run-id>` hands it to that provider's interactive CLI in a new Herdr tab. The keybinding is `r` in the dashboard's runs and log panes, because reading a run's log is exactly when you decide it's worth continuing by hand.
+
+**For claude jobs this never worked.** The headless invocation carried `--no-session-persistence` from the very first commit. Claude's own `--help` is explicit about what that means — sessions "will not be saved to disk and **cannot be resumed**" — but the flag doesn't suppress the `session_id` on the init event, so jobtail captured an id, wrote it to the database, and displayed it, for a session that had already been discarded. Everything looked correct right up until you tried to use it:
+
+```
+$ claude --resume ac646d2f-70f0-484a-a2fe-2c0e9ce6fdd3 -p "say ok"
+No conversation found with session ID: ac646d2f-70f0-484a-a2fe-2c0e9ce6fdd3
+```
+
+Confirmed on disk too: `~/.claude/projects/<slugified cwd>/` held no transcript for any of the eight agent runs in the live database. This PRD asserted the opposite ("a run that later fails is still resumable via `jobtail resume`") for as long as the flag was there.
+
+Dropping the flag fixes it, verified end to end against the real binary — a headless run was told a magic word, and a later `--resume` of that session recalled it. `opencode` and `codex` never passed an equivalent opt-out, so only claude was affected.
+
+**The cost is real and accepted**: every agent run now leaves a transcript under `~/.claude/projects/`, and appears in claude's own `/resume` picker. Nothing prunes those — `jobtail gc` bounds jobtail's run rows and log files, not another tool's session store. That is the price of the id meaning something, and it was chosen deliberately over making persistence opt-in per job, on the grounds that the run you wish you could resume is precisely the one you hadn't thought to enable it for.
+
+**A second, independent break, found only by running the thing.** With the session finally persisted, `jobtail resume` still failed — `herdr tab create: exit status 2`. The call had always passed `--json`, and herdr 0.9.0 has no such flag on `tab create` (nor on `pane split`): it answers `unknown option: --json` and exits 2. These socket-API commands already emit JSON by default, in exactly the `result.root_pane.pane_id` shape the parser expected, so the flag was pure liability. Every unit test passed throughout, because they all tested the *parsing* of a reply the command never got far enough to produce. The regression test now drives a fake `herdr` on `PATH` that rejects `--json` the same way the real one does, so the argv is covered and not just the parse.
+
+The resume logic lives in `internal/resume` rather than in the cobra command, because two callers need it — the CLI and the dashboard — and a second copy would drift. `Possible` is a pure check on data already in hand (agent kind, session id present), so `View` can call it every frame to decide whether to advertise the key at all; `Open` does the PATH lookup and the two `herdr` calls, and runs off the Update goroutine so a wedged herdr can't freeze the dashboard.
+
+What `Possible` deliberately cannot tell you is whether the session is still *on disk*. Nothing in the database can: the id is recorded while the agent is running, and the provider may prune the transcript later. That failure surfaces as the agent CLI's own message in the tab that opens, which is the right place for it.
