@@ -228,12 +228,20 @@ func runClaudeAgent(ctx context.Context, j store.Job, logPath string, onSessionI
 	defer f.Close()
 	w := newCapWriter(f, LogCapBytes)
 
+	// Deliberately *not* --no-session-persistence. That flag was here from
+	// the first commit and quietly made `jobtail resume` a no-op for claude
+	// jobs: claude's own --help says sessions run under it "will not be
+	// saved to disk and cannot be resumed". The session id still arrives on
+	// the init event and was still captured into runs.session_id, so
+	// everything looked right in the database while the session it named had
+	// already been discarded — `claude --resume <that id>` answers "No
+	// conversation found with session ID". Persisting is what makes the
+	// captured id mean something (PRD §14, §20).
 	args := []string{
 		"-p", j.Prompt,
 		"--output-format", "stream-json",
 		"--verbose", // claude 2.1.x refuses -p --output-format=stream-json without it
 		"--add-dir", j.Cwd,
-		"--no-session-persistence",
 	}
 	if j.PermissionMode != "" {
 		args = append(args, "--permission-mode", j.PermissionMode)
