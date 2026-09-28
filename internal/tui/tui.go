@@ -1523,7 +1523,7 @@ func (m model) runsPane(boxHeight int) string {
 }
 
 func (m model) logPane(boxHeight int) string {
-	title := m.paneTitle("Log", 0, 0)
+	title := m.logPaneTitle()
 	// The tables say where you are via "3/21"; the log needs its own
 	// version of that, or a long transcript gives no clue that there's
 	// more above or below the visible slice. Only shown when it's
@@ -1532,6 +1532,49 @@ func (m model) logPane(boxHeight int) string {
 		title = fmt.Sprintf("%s %d%%", title, int(m.logVP.ScrollPercent()*100))
 	}
 	return renderPane(title, accentLog, m.focus == focusLog, m.logVP.View())
+}
+
+// logPaneTitle identifies whose output the log pane shows. Run IDs alone
+// ("20260928T101532.123456789") don't say which job produced them, and
+// visually scanning several similar timestamps is how you end up reading
+// the wrong run. The title therefore carries the job name and the run's
+// local start time, mirroring the Runs pane columns, so the pane answers
+// "what am I looking at" on its own.
+func (m model) logPaneTitle() string {
+	run := m.selectedRunWithMeta()
+	label := "Log"
+	if run != nil {
+		name := run.JobID
+		if job := m.jobByID(run.JobID); job != nil {
+			name = job.ID
+		}
+		label = fmt.Sprintf("Log %s · %s · %s", name,
+			run.StartedAt.Local().Format("01-02 15:04:05"), run.ID)
+	}
+	return m.paneTitle(label, 0, 0)
+}
+
+func (m model) selectedRunWithMeta() *store.Run {
+	id, _ := m.selectedRun()
+	return m.runByID(id)
+}
+
+func (m model) runByID(id string) *store.Run {
+	for i := range m.runs {
+		if m.runs[i].ID == id {
+			return &m.runs[i]
+		}
+	}
+	return nil
+}
+
+func (m model) jobByID(id string) *store.JobSummary {
+	for i := range m.jobs {
+		if m.jobs[i].ID == id {
+			return &m.jobs[i]
+		}
+	}
+	return nil
 }
 
 // paneTitle labels a pane and, for the list panes, says where you are in
