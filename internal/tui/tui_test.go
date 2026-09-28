@@ -254,6 +254,15 @@ func TestTUINavigatesJobsToRunsToLog(t *testing.T) {
 	if !strings.Contains(m.View(), "hello-from-seeded-log") {
 		t.Fatalf("log pane missing the seeded run's content:\n%s", m.View())
 	}
+	// The log title must identify what we are looking at: job name, local
+	// start time, run id. A bare "Log" loses the job↔run association the
+	// moment more than one job exists.
+	if !strings.Contains(m.View(), "Log greet · ") {
+		t.Fatalf("log title missing job name:\n%s", m.View())
+	}
+	if !strings.Contains(m.View(), "seed-run-1") {
+		t.Fatalf("log title missing run id:\n%s", m.View())
+	}
 
 	m = send(t, m, special(tea.KeyEsc))
 	m = send(t, m, special(tea.KeyEsc))
