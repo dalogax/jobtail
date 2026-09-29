@@ -14,6 +14,10 @@
 
 ---
 
+<p align="center"><img src="docs/demo.gif" alt="jobtail demo: adding a cli job and an agent job, opening the dashboard, running a job, drilling into a failed run's log, and live-tailing an agent run's transcript" width="900"></p>
+
+<p align="center"><sub>Add a shell job and an agent job → open the dashboard → run one now → drill into a failed run's log → watch an agent run stream in live. (Sped up; recorded from <a href="scripts/demo/demo.tape"><code>scripts/demo/demo.tape</code></a>.)</sub></p>
+
 ## What it is
 
 `jobtail` is a small scheduler and dashboard for two kinds of recurring job:
