@@ -92,3 +92,12 @@ func TestRenderLogDispatchesToProviderTranscript(t *testing.T) {
 		t.Fatalf("codex provider should render via renderCodexTranscript, got:\n%s", got)
 	}
 }
+
+func TestRenderTranscriptKeepsShellOperatorsInToolInput(t *testing.T) {
+	raw := `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"npm install && npm test > out.log"}}]}}
+`
+	got := renderTranscript(raw)
+	if !strings.Contains(got, `npm install && npm test > out.log`) {
+		t.Fatalf("tool input should render &, < and > literally, not as \\u0026-style escapes:\n%s", got)
+	}
+}

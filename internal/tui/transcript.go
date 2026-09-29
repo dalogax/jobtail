@@ -99,11 +99,16 @@ func compactJSON(raw json.RawMessage) string {
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return string(raw)
 	}
-	b, err := json.Marshal(v)
-	if err != nil {
+	// json.Marshal escapes &, < and > as \u0026 etc. for safe embedding in
+	// HTML, which turns every `a && b` a tool ran into `a \u0026\u0026 b`.
+	// This is terminal output, so write them as-is.
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
 		return string(raw)
 	}
-	s := string(b)
+	s := strings.TrimSuffix(b.String(), "\n")
 	if len(s) > 120 {
 		s = s[:117] + "..."
 	}
