@@ -151,18 +151,18 @@ func TestResumeKeyRefusesACliRun(t *testing.T) {
 // rule that made hintsFor pane-aware in the first place.
 func TestHelpBarOnlyOffersResumeWhenItWouldWork(t *testing.T) {
 	for _, focus := range []focusPane{focusRuns, focusLog} {
-		withSession := renderHelpBar(200, focus, "", true)
+		withSession := renderHelpBar(200, focus, "", true, false)
 		if !strings.Contains(withSession, "resume") {
 			t.Errorf("focus %v: resumable selection but the bar offers no resume hint: %q", focus, withSession)
 		}
-		without := renderHelpBar(200, focus, "", false)
+		without := renderHelpBar(200, focus, "", false, false)
 		if strings.Contains(without, "resume") {
 			t.Errorf("focus %v: unresumable selection but the bar still offers resume: %q", focus, without)
 		}
 	}
 	// The jobs pane's "r" is "run now", which is a different action and must
 	// keep its own hint regardless.
-	jobsBar := renderHelpBar(200, focusJobs, "", true)
+	jobsBar := renderHelpBar(200, focusJobs, "", true, false)
 	if strings.Contains(jobsBar, "resume") {
 		t.Errorf("the jobs pane offered a resume hint: %q", jobsBar)
 	}
@@ -177,7 +177,7 @@ func TestHelpBarOnlyOffersResumeWhenItWouldWork(t *testing.T) {
 func TestResumeHintNeverCrowdsOutQuit(t *testing.T) {
 	for _, width := range []int{30, 40, 50, 60, 80, 100} {
 		for _, focus := range []focusPane{focusJobs, focusRuns, focusLog} {
-			bar := renderHelpBar(width, focus, "", true)
+			bar := renderHelpBar(width, focus, "", true, true)
 			if lipgloss.Width(bar) > width {
 				t.Errorf("width %d, focus %v: bar is %d cols wide: %q",
 					width, focus, lipgloss.Width(bar), bar)

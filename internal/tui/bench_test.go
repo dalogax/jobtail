@@ -199,6 +199,38 @@ func BenchmarkRenderTranscript(b *testing.B) {
 	}
 }
 
+// BenchmarkParseTranscript and BenchmarkRenderBlocks split the two halves
+// apart, because only one of them is on the interactive path. A log is parsed
+// once when it is read; it is *rendered* again on every cursor step, fold and
+// resize, so BenchmarkRenderBlocks is what governs how a keypress feels in a
+// long transcript.
+func BenchmarkParseTranscript(b *testing.B) {
+	for _, kb := range []int{8, 256, 1024} {
+		b.Run(fmt.Sprintf("%dKB", kb), func(b *testing.B) {
+			raw := benchTranscript(b, kb)
+			b.SetBytes(int64(len(raw)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = parseClaudeTranscript(raw)
+			}
+		})
+	}
+}
+
+func BenchmarkRenderBlocks(b *testing.B) {
+	for _, kb := range []int{8, 256, 1024} {
+		b.Run(fmt.Sprintf("%dKB", kb), func(b *testing.B) {
+			blocks := parseClaudeTranscript(benchTranscript(b, kb))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = renderBlocks(blocks, renderOpts{width: 168, cursor: 0})
+			}
+		})
+	}
+}
+
 // BenchmarkWrapForViewport is the other half of preparing a log for
 // display: word-wrapping the rendered transcript to the pane width.
 func BenchmarkWrapForViewport(b *testing.B) {

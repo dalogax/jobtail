@@ -279,13 +279,26 @@ type model struct {
 	runsTable table.Model
 	logVP     viewport.Model
 
-	// What the log pane holds, and what it was built from. logText is
-	// renderLog's output before wrapping, so a resize can re-wrap without
-	// touching the disk or the transcript parser; logShown is the file
-	// identity a refresh checks against before reading anything at all.
+	// What the log pane holds, and what it was built from. logShown is the
+	// file identity a refresh checks against before reading anything at all.
+	//
+	// The two content fields are exclusive: a cli job's log is plain text held
+	// in logText and wrapped at render time, while an agent's is parsed into
+	// logBlocks once and re-rendered from there. Keeping the parsed blocks
+	// rather than a finished string is what lets a resize, a cursor move and a
+	// fold all re-render without touching the disk or the parser again.
 	logShown     logShown
-	logText      string
+	logText      string  // cli jobs
+	logBlocks    []block // agent jobs
 	logWrapWidth int
+
+	// The log pane's own cursor: a block index (not a line), which moves
+	// between the foldable blocks of logBlocks. -1 when the log has nothing
+	// foldable in it, in which case the pane has no cursor at all and j/k go
+	// back to being ordinary scroll keys.
+	logView     transcriptView
+	logCursor   int
+	logExpanded map[int]bool
 
 	width, height int
 	err           error
@@ -612,15 +625,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			m.logShown = logShown{runID: msg.runID, missing: true}
-			m.logText = ""
+			m.logText, m.logBlocks = "", nil
 			m.logVP.SetContent("(no log yet)")
 			return m, nil
 		}
 		m.logShown = logShown{runID: msg.runID, size: msg.size, modTime: msg.modTime}
-		// Keep the rendered-but-unwrapped text: a resize then only has to
-		// re-wrap it, instead of re-reading and re-parsing the whole log.
-		m.logText = renderLog(msg.text, m.selectedJobKind(), m.selectedJobProvider())
-		m.rewrapLog()
+		m.setLogContent(msg.text)
 		return m, nil
 
 	case runFinishedMsg:
@@ -784,20 +794,157 @@ func (m *model) layout() {
 	// the whole log anyway; now that a tick leaves an unchanged log alone,
 	// the resize has to say so — and says it immediately rather than on
 	// whichever later refresh happened to rebuild the pane.
-	if m.logVP.Width != m.logWrapWidth && m.logText != "" {
-		m.rewrapLog()
+	if m.logVP.Width != m.logWrapWidth && (m.logText != "" || m.logBlocks != nil) {
+		m.rebuildLogView()
 	}
 }
 
-// rewrapLog re-wraps the loaded log to the pane's current width, holding the
-// view at the bottom if it was already there (live-tailing a running job).
-func (m *model) rewrapLog() {
+// setLogContent installs a freshly read log: parsed into blocks for an agent
+// run, kept as plain text for a cli one.
+//
+// The fold state is reset here rather than carried over, because block indices
+// only mean anything within one parse — a re-read of a *growing* log yields
+// more blocks, and holding on to "block 7 is expanded" across that would
+// expand whichever block happened to land at 7 next time.
+func (m *model) setLogContent(raw string) {
+	m.logText, m.logBlocks = "", nil
+	m.logExpanded = map[int]bool{}
+	m.logCursor = -1
+
+	if m.selectedJobKind() == "agent" {
+		m.logBlocks = parseTranscript(raw, execengine.EffectiveProvider(m.selectedJobProvider()))
+		m.logCursor = firstFoldable(m.logBlocks)
+	} else {
+		m.logText = raw
+	}
+	m.rebuildLogView()
+}
+
+// rebuildLogView re-renders the log pane to its current width, cursor and fold
+// state, holding the view at the bottom if it was already there (live-tailing a
+// running job).
+func (m *model) rebuildLogView() {
 	atBottom := m.logVP.AtBottom()
-	m.logVP.SetContent(wrapForViewport(m.logText, m.logVP.Width))
+	if m.logBlocks == nil {
+		m.logView = transcriptView{}
+		m.logVP.SetContent(wrapForViewport(m.logText, m.logVP.Width))
+	} else {
+		m.logView = renderBlocks(m.logBlocks, renderOpts{
+			width:    m.logVP.Width,
+			cursor:   m.logCursor,
+			expanded: m.logExpanded,
+		})
+		m.logVP.SetContent(m.logView.content)
+	}
 	m.logWrapWidth = m.logVP.Width
 	if atBottom {
 		m.logVP.GotoBottom()
 	}
+}
+
+// firstFoldable is where the log pane's cursor starts: the first block that has
+// anything hidden. -1 when there is none.
+func firstFoldable(blocks []block) int {
+	for i, b := range blocks {
+		if b.foldable() {
+			return i
+		}
+	}
+	return -1
+}
+
+// scrollToCursor brings the cursor's block into view, doing nothing when it is
+// already fully visible so that ordinary scrolling isn't yanked back.
+func (m *model) scrollToCursor() {
+	if m.logCursor < 0 || m.logCursor >= len(m.logView.top) || m.logVP.Height <= 0 {
+		return
+	}
+	top, bottom := m.logView.top[m.logCursor], m.logView.bottom[m.logCursor]
+	off := m.logVP.YOffset
+	switch {
+	case top < off:
+		off = top
+	case bottom > off+m.logVP.Height-1:
+		off = bottom - m.logVP.Height + 1
+		// A block taller than the pane — an expanded 600-line tool result —
+		// would otherwise scroll to its tail and hide the call it belongs to.
+		// Its head is the part that says what you're looking at.
+		if off > top {
+			off = top
+		}
+	default:
+		return
+	}
+	m.logVP.SetYOffset(off)
+}
+
+// moveLogCursor steps the cursor to the next/previous foldable block. With
+// nothing foldable in the log there is no cursor, and j/k stay plain scroll
+// keys instead of becoming dead ones.
+func (m model) moveLogCursor(delta int, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	stops := m.logView.stops
+	if len(stops) == 0 {
+		var cmd tea.Cmd
+		m.logVP, cmd = m.logVP.Update(msg)
+		return m, cmd
+	}
+	i := slices.Index(stops, m.logCursor)
+	if i < 0 {
+		i = 0
+	} else {
+		i += delta
+	}
+	i = min(max(i, 0), len(stops)-1)
+	prev := m.logCursor
+	m.logCursor = stops[i]
+	if m.logCursor != prev {
+		// Only the marker moved, so patch the two lines that changed instead of
+		// re-rendering every block below them.
+		m.logView.markCursor(prev, m.logCursor, stylesFor(false))
+		m.logVP.SetContent(m.logView.content)
+	}
+	m.scrollToCursor()
+	return m, nil
+}
+
+// toggleLogFold expands or collapses the block under the cursor.
+func (m model) toggleLogFold() (tea.Model, tea.Cmd) {
+	if m.logCursor < 0 {
+		return m, nil
+	}
+	if m.logExpanded == nil {
+		m.logExpanded = map[int]bool{}
+	}
+	m.logExpanded[m.logCursor] = !m.logExpanded[m.logCursor]
+	m.rebuildLogView()
+	m.scrollToCursor()
+	return m, nil
+}
+
+// toggleLogExpandAll expands every foldable block, or collapses them all once
+// none are left folded — one key for "show me everything" and back again,
+// which is the common case when skimming a whole run rather than one step.
+func (m model) toggleLogExpandAll() (tea.Model, tea.Cmd) {
+	stops := m.logView.stops
+	if len(stops) == 0 {
+		return m, nil
+	}
+	expand := false
+	for _, i := range stops {
+		if !m.logExpanded[i] {
+			expand = true
+			break
+		}
+	}
+	if m.logExpanded == nil {
+		m.logExpanded = map[int]bool{}
+	}
+	for _, i := range stops {
+		m.logExpanded[i] = expand
+	}
+	m.rebuildLogView()
+	m.scrollToCursor()
+	return m, nil
 }
 
 // topRowHeight sizes the wide layout's jobs/runs row to the content it
@@ -1083,7 +1230,16 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.layout() // focus steers the space split (see stackedHeights)
 		}
 		return m, nil
-	case "enter", "l", "right":
+	case "enter":
+		// In the log pane there is no deeper pane to open, so enter is the
+		// fold toggle for the block under the cursor.
+		if m.focus == focusLog {
+			return m.toggleLogFold()
+		}
+		m.setFocus(m.focus + 1)
+		m.layout()
+		return m, nil
+	case "l", "right":
 		if m.focus < focusLog {
 			m.setFocus(m.focus + 1)
 			m.layout()
@@ -1118,6 +1274,16 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmd, m.reloadLog(newID, path))
 		}
 	case focusLog:
+		// j/k walk the transcript's foldable blocks; ↑/↓ stay line scrolling,
+		// so both ways of moving through a log remain available.
+		switch msg.String() {
+		case "j":
+			return m.moveLogCursor(1, msg)
+		case "k":
+			return m.moveLogCursor(-1, msg)
+		case "o":
+			return m.toggleLogExpandAll()
+		}
 		m.logVP, cmd = m.logVP.Update(msg)
 	}
 	return m, cmd
@@ -1579,7 +1745,7 @@ func (m model) View() string {
 			m.logPane(m.height-1-m.topBoxHeight))
 	}
 
-	return body + "\n" + renderHelpBar(m.width, m.focus, m.statusMsg, m.canResumeSelection())
+	return body + "\n" + renderHelpBar(m.width, m.focus, m.statusMsg, m.canResumeSelection(), len(m.logView.stops) > 0)
 }
 
 func (m model) jobsPane(boxHeight int) string {
@@ -1889,7 +2055,7 @@ type helpHint struct {
 // canResume follows the same rule: "r resume" only acts on an agent run
 // that captured a session id, so a cli job's runs — or an agent run that
 // died before its session id arrived — must not advertise it.
-func hintsFor(focus focusPane, canResume bool) []helpHint {
+func hintsFor(focus focusPane, canResume, canFold bool) []helpHint {
 	// Dropped first of the pane's real hints: useful, but the one you can
 	// most afford to lose on a narrow terminal.
 	resumeHint := helpHint{key: "r", long: "resume session", short: "resume", drop: 4}
@@ -1908,7 +2074,18 @@ func hintsFor(focus focusPane, canResume bool) []helpHint {
 		)
 	case focusLog:
 		hints := []helpHint{
-			{key: "↑↓", long: "scroll", short: "scroll", drop: 2},
+			{key: "↑↓", long: "scroll", short: "scroll", drop: 5},
+		}
+		// The fold keys are only advertised when the log on screen actually has
+		// something folded in it: a cli job's output and a short transcript
+		// have no blocks to step through, and the same rule that keeps "r" off
+		// a cli run keeps these off too.
+		if canFold {
+			hints = append(hints,
+				helpHint{key: "jk", long: "step", short: "step", drop: 7},
+				helpHint{key: "enter", long: "expand", short: "expand", drop: 6},
+				helpHint{key: "o", long: "expand all", short: "all", drop: 8},
+			)
 		}
 		if canResume {
 			hints = append(hints, resumeHint)
@@ -1936,8 +2113,8 @@ func hintsFor(focus focusPane, canResume bool) []helpHint {
 // columns — at 80 the "q quit" hint was gone entirely (so nothing on screen
 // said how to exit), and at 60 it cut mid-word to "e enable/dis". Hints now
 // shorten, then drop whole, worst-priority first.
-func renderHelpBar(width int, focus focusPane, statusMsg string, canResume bool) string {
-	hints := hintsFor(focus, canResume)
+func renderHelpBar(width int, focus focusPane, statusMsg string, canResume, canFold bool) string {
+	hints := hintsFor(focus, canResume, canFold)
 	key := func(k, desc string) string {
 		return helpKeyStyle.Render(k) + helpStyle.Render(" "+desc)
 	}
@@ -2001,22 +2178,19 @@ func withStatus(bar, statusMsg string, width int) string {
 	return bar
 }
 
-// renderLog renders a run's captured output for the log pane: agent
-// transcripts get a lightly parsed, readable rendering (which parser
-// depends on which agent CLI produced the log — PRD §14); cli logs are
-// shown as-is (PRD §9).
+// renderLog is the plain-text rendering of a run's captured output: agent
+// transcripts get the parsed, readable form (which parser depends on which
+// agent CLI produced the log — PRD §14); cli logs are shown as-is (PRD §9).
+//
+// The dashboard no longer goes through here — it keeps the parsed blocks so it
+// can fold and move a cursor through them (setLogContent) — but this is still
+// the whole-log view, unstyled and fully expanded, for anything that just wants
+// the text.
 func renderLog(raw, jobKind, provider string) string {
 	if jobKind != "agent" {
 		return raw
 	}
-	switch execengine.EffectiveProvider(provider) {
-	case execengine.ProviderOpenCode:
-		return renderOpenCodeTranscript(raw)
-	case execengine.ProviderCodex:
-		return renderCodexTranscript(raw)
-	default:
-		return renderTranscript(raw)
-	}
+	return renderPlain(parseTranscript(raw, execengine.EffectiveProvider(provider)))
 }
 
 // truncateToWidth cuts a styled string to a visible column count, keeping
