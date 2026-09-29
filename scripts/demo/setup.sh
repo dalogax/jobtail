@@ -11,6 +11,9 @@ rm -rf "$demo"
 mkdir -p "$demo/bin" "$demo/home/scripts" "$demo/home/code/shop"
 go build -C "$repo" -o "$demo/bin/jobtail" ./cmd/jobtail
 cp "$repo/scripts/demo/fake_claude.sh" "$demo/bin/claude"
+# Shadows any real herdr on PATH: see fake_herdr.sh for why the demo must not
+# reach one.
+cp "$repo/scripts/demo/fake_herdr.sh" "$demo/bin/herdr"
 
 cat > "$demo/home/scripts/check_backups.sh" <<'SH'
 #!/bin/sh
