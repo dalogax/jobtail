@@ -27,12 +27,46 @@
 
 A per-user timer — `systemd --user` on Linux, a LaunchAgent on macOS — checks for due jobs once a minute; each due job runs as its own process and writes its own log file. Everything — job definitions, run history, status — lives in one SQLite database. There's no daemon of jobtail's own to keep alive, and nothing tying it to any particular terminal, multiplexer, or session.
 
+## You talk to your agent; your agent drives jobtail
+
+The `jobtail` CLI isn't really meant for you to type. It's built to be driven by a coding agent like Claude Code, opencode or Codex. What you use is the dashboard.
+
+You ask your agent in plain words:
+
+> every night at 3, check ~/code/shop for outdated dependencies and open a PR if it's safe to bump them
+
+The agent then does the rest on your behalf:
+- turns that into a `jobtail add` with the right cron, working directory and prompt
+- sets a timeout and a precheck where they make sense
+- test-runs the job once
+- tells you when it's scheduled
+
+Later, "why did the backup check fail last night?" has it read the run's log for you. When you want to look for yourself, run `jobtail` and the dashboard opens.
+
+What makes this work is the **jobtail skill** ([`skills/jobtail/SKILL.md`](skills/jobtail/SKILL.md)). It teaches an agent:
+- how to install jobtail and check that its timer is actually running
+- how to write prompts that work unattended
+- how to gate agent runs behind a cheap precheck
+- how to read runs as JSON
+- what not to do, like hand-writing crontabs or `rm`-ing a job's history
+
+The installer offers to add the skill for every supported agent it finds. You can also add it, or update it, at any time:
+
+```sh
+jobtail install-skill                   # every agent it finds: claude, opencode, codex
+jobtail install-skill --agent claude    # or just the ones you name
 ```
+
+The skill is embedded in the binary, so the version installed always matches the jobtail it came from. `jobtail upgrade` refreshes every copy that's already installed.
+
+If you do want to use the CLI by hand, nothing stops you:
+
+```sh
 jobtail add backup-check --kind cli --cron "*/15 * * * *" \
   --cwd ~/scripts --cmd "./check_backups.sh"
 
 jobtail add nightly-review --kind agent --cron "0 3 * * *" \
-  --cwd ~/code/myproject \
+  --cwd ~/code/myproject --timeout-seconds 1800 \
   --prompt "Check for outdated dependencies. Open a PR if it's safe to update; otherwise report why not."
 
 jobtail          # opens the dashboard
@@ -68,7 +102,9 @@ curl -fsSL https://raw.githubusercontent.com/dalogax/jobtail/main/install.sh | s
 
 Downloads the right release binary for your OS/arch (Linux and macOS, amd64/arm64), installs it to `~/.local/bin`, and adds that to your `PATH` if it isn't there already. No Go toolchain, no package manager required.
 
-Then wire up the scheduler:
+If it finds claude, opencode or codex on your machine, it asks whether to install the [jobtail skill](#you-talk-to-your-agent-your-agent-drives-jobtail) for them. With no terminal attached (CI, a provisioning script), it doesn't ask; it prints the command to run instead. Set `JOBTAIL_SKILL=yes` or `JOBTAIL_SKILL=no` to answer ahead of time.
+
+Then wire up the scheduler (or let your agent do it: the skill checks this first):
 
 ```sh
 jobtail install-scheduler --enable
@@ -158,10 +194,11 @@ jobtail rm <id>             Delete a job and its run history
 jobtail gc                 Prune old runs (and their logs) past retention
 jobtail install-scheduler  Install the per-user timer that runs due jobs
 jobtail upgrade            Check for and install a newer release
+jobtail install-skill      Install the jobtail skill for your coding agents
 jobtail                    Open the dashboard (same as `jobtail tui`)
 ```
 
-Every command supports `--json` for scripting. `jobtail <command> --help` for the full flag list.
+`list`, `show` and `runs` take `--json` for scripting. `jobtail <command> --help` for the full flag list.
 
 ## How it works, and why
 

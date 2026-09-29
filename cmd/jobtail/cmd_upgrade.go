@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 
@@ -58,6 +59,15 @@ func newUpgradeCmd() *cobra.Command {
 				return fmt.Errorf("install: %w", err)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "upgraded %s -> %s\n", displayVersion(cur), rel.TagName)
+
+			// The skill is embedded in the binary, so installed copies are
+			// now one version behind. Only the new binary has the new copy,
+			// so it does the refresh. Failing here doesn't undo the upgrade.
+			refresh := exec.Command(execPath, "install-skill", "--only-installed")
+			refresh.Stdout, refresh.Stderr = cmd.OutOrStdout(), cmd.ErrOrStderr()
+			if err := refresh.Run(); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "jobtail: could not refresh the agent skill (%v); run: jobtail install-skill\n", err)
+			}
 			return nil
 		},
 	}

@@ -38,6 +38,7 @@ func currentVersion() string {
 // reports version status itself.
 var noUpdateCheckCommands = map[string]bool{
 	"tick": true, "run-exec": true, "tui": true, "jobtail": true, "upgrade": true, "completion": true,
+	"install-skill": true, // run by install.sh and upgrade, right after installing the newest release
 }
 
 // app bundles everything a subcommand needs: the open store and resolved
@@ -114,6 +115,7 @@ func main() {
 		newTUICmd(),
 		newInstallSchedulerCmd(),
 		newUpgradeCmd(),
+		newInstallSkillCmd(),
 	)
 
 	ran, err := root.ExecuteC()
