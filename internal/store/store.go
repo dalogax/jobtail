@@ -219,7 +219,13 @@ type Store struct {
 }
 
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
+	// _txlock=immediate makes every transaction BEGIN IMMEDIATE, taking the
+	// write lock up front. StartRun's reads-then-writes as a deferred BEGIN
+	// failed with SQLITE_BUSY_SNAPSHOT whenever another process committed
+	// in between — and busy_timeout never retries that, because waiting
+	// can't make a stale read snapshot current. An immediate transaction
+	// waits for the lock under busy_timeout like any single write does.
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
