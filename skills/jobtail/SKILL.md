@@ -38,7 +38,7 @@ jobtail add <id> --kind agent --cron "<5-field cron>" --cwd <abs dir> --prompt "
   [--provider claude|opencode|codex] [--model <alias>] [--permission-mode <mode>]
 ```
 
-Optional flags for either kind: `--timeout-seconds N`, `--precheck "<cmd>"`, `--precheck-timeout-seconds N`, `--timezone <IANA name>` (the default is `local`), `--keep N` (runs to retain, default 200), `--max-concurrent N` (default 1).
+Optional flags for either kind: `--timeout-seconds N` (default 1800, i.e. 30 minutes), `--precheck "<cmd>"`, `--precheck-timeout-seconds N`, `--timezone <IANA name>` (the default is `local`), `--keep N` (runs to retain, default 200), `--max-concurrent N` (default 1).
 
 Rules the CLI enforces, which you'd otherwise find out one error at a time:
 
@@ -66,7 +66,7 @@ No human is watching when the job runs, and nobody can answer a question. Write 
   - codex's `workspace-write` has no network access by default, so pushes and API calls fail there too.
 
   If you skip this step, the job "works" in the sense that it runs every time, but it never gets to the part the user asked for.
-- **Always set `--timeout-seconds` on agent jobs.** 1800 is a reasonable default. Without one, a stuck run holds its concurrency slot, and every later run is recorded as `skipped_overlap`.
+- **Size `--timeout-seconds` to the task.** Every run is killed at its timeout (default 1800, i.e. 30 minutes) and recorded as `timeout`. That suits most agent turns. Raise it for jobs that legitimately take longer, such as a big refactor or a slow test suite, so they don't time out every night. `0` means the default, not unlimited.
 
 ### Prechecks: only run the agent when there's work
 
@@ -105,7 +105,9 @@ jobtail log <run-id>           # the full log; agent logs are raw stream-json
 
 Things to know when reading the output:
 
-- **Run `Status` values:** `running`, `ok`, `failed`, `timeout`, `skipped` (the precheck said there was nothing to do), and `skipped_overlap` (the previous run was still going).
+- **Run `Status` values:** `running`, `ok`, `failed`, `timeout` (killed at its timeout), `skipped` (the precheck said there was nothing to do), and `skipped_overlap` (the previous run was still going).
+- **`TimeoutSeconds: 0`** on a job means the 30-minute default.
+- **Reaped runs:** if the process executing a run died, jobtail finalizes the run on the next tick. The run's log then ends with a `[jobtail] reaped: ...` line saying why.
 - **Nullable fields** are objects rather than plain values. `ExitCode` is `{"Int64": 1, "Valid": true}`, and `FinishedAt`, `DurationMs` and `SessionID` use the same shape. Check `Valid` before you use the value.
 - **Newest first:** `recent_runs` and `runs` list the newest run first.
 - **Agent logs** are the provider's JSON event stream. Read them for what the agent said and did. The final `{"type":"result",...}` line says whether it succeeded.
@@ -115,7 +117,7 @@ To diagnose "why did X fail?", run `show <id> --json`, take the newest failed ru
 - the timer's `PATH` is missing the agent CLI (re-run `install-scheduler --enable`)
 - the prompt asked a question nobody could answer
 - permissions blocked an edit
-- the run hit the timeout
+- the run hit its timeout (status `timeout`; the log ends with `[jobtail] killed: run exceeded its timeout`). If the job legitimately needs longer, raise the limit with `edit --timeout-seconds`.
 
 **Resuming an agent run:** `jobtail resume <run-id>` reopens that agent run's session interactively (`claude --resume`, `opencode --session`, or `codex resume`). It needs a terminal, so tell the user to run it themselves, or to press `r` on the run in the dashboard. Don't run it from your tool shell.
 

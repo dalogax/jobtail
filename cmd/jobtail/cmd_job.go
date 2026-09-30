@@ -131,6 +131,9 @@ func newAddCmd() *cobra.Command {
 			if maxConcurrent <= 0 {
 				maxConcurrent = 1
 			}
+			if timeoutSeconds < 0 {
+				return fmt.Errorf("--timeout-seconds can't be negative")
+			}
 			if keep <= 0 {
 				keep = 200
 			}
@@ -166,11 +169,19 @@ func newAddCmd() *cobra.Command {
 		"codex values are a --sandbox policy, read-only/workspace-write (default)/danger-full-access; unused by opencode (kind=agent)")
 	cmd.Flags().StringVar(&timezone, "timezone", "local", `cron timezone: "local" or an IANA name`)
 	cmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 1, "max simultaneous runs of this job")
-	cmd.Flags().Int64Var(&timeoutSeconds, "timeout-seconds", 0, "hard kill after N seconds (0 = no timeout)")
+	cmd.Flags().Int64Var(&timeoutSeconds, "timeout-seconds", 0, "kill a run after N seconds and record it as timeout (0 = the default, 1800 = 30m)")
 	cmd.Flags().IntVar(&keep, "keep", 200, "how many past runs to retain")
 	cmd.Flags().StringVar(&precheck, "precheck", "", "shell gate run before execution: exit 0 runs the job (stdout becomes PENDING ITEMS context for agent prompts), exit 1 marks the run skipped, exit >=2 fails it (agent jobs mainly)")
 	cmd.Flags().Int64Var(&precheckTimeoutSeconds, "precheck-timeout-seconds", 0, "hard kill the precheck after N seconds (0 = no timeout)")
 	return cmd
+}
+
+// timeoutLabel is a job's effective timeout for display, marking the default.
+func timeoutLabel(j store.Job) string {
+	if j.TimeoutSeconds <= 0 {
+		return j.Timeout().String() + " (default)"
+	}
+	return j.Timeout().String()
 }
 
 func newListCmd() *cobra.Command {
@@ -263,6 +274,7 @@ func newShowCmd() *cobra.Command {
 				fmt.Fprintf(out, "precheck-timeout: %ds\n", j.PrecheckTimeoutSeconds)
 			}
 			fmt.Fprintf(out, "max-concurrent:  %d\n", j.MaxConcurrent)
+			fmt.Fprintf(out, "timeout:         %s\n", timeoutLabel(j))
 			fmt.Fprintf(out, "keep:            %d\n", j.Keep)
 			fmt.Fprintln(out, "recent runs:")
 			for _, r := range runs {
@@ -409,6 +421,9 @@ func newEditCmd() *cobra.Command {
 				p.MaxConcurrent = &maxConcurrent
 			}
 			if cmd.Flags().Changed("timeout-seconds") {
+				if timeoutSeconds < 0 {
+					return fmt.Errorf("--timeout-seconds can't be negative")
+				}
 				p.TimeoutSeconds = &timeoutSeconds
 			}
 			if cmd.Flags().Changed("keep") {
@@ -430,7 +445,7 @@ func newEditCmd() *cobra.Command {
 	cmd.Flags().StringVar(&permMode, "permission-mode", "", "permission mode (kind=agent; meaning is provider-specific, see `add --help`)")
 	cmd.Flags().StringVar(&timezone, "timezone", "", `cron timezone`)
 	cmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 0, "max simultaneous runs")
-	cmd.Flags().Int64Var(&timeoutSeconds, "timeout-seconds", 0, "hard kill after N seconds")
+	cmd.Flags().Int64Var(&timeoutSeconds, "timeout-seconds", 0, "kill a run after N seconds (0 = the default, 1800 = 30m)")
 	cmd.Flags().IntVar(&keep, "keep", 0, "how many past runs to retain")
 	cmd.Flags().StringVar(&precheck, "precheck", "", "shell gate run before execution (empty string clears it)")
 	cmd.Flags().Int64Var(&precheckTimeoutSeconds, "precheck-timeout-seconds", 0, "hard kill the precheck after N seconds")

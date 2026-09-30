@@ -110,3 +110,27 @@ func TestMigrationAddsDurationMsToExistingDB(t *testing.T) {
 		t.Fatalf("want duration_ms=1234, got %+v", got.DurationMs)
 	}
 }
+
+// Jobs from before the 30-minute default had NULL timeout_seconds, meaning
+// "no limit". They must now get the default, while explicit values stand.
+func TestUnsetTimeoutMeansTheDefault(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	for _, j := range []Job{
+		{ID: "unset", Kind: "cli", Cron: "0 0 * * *", Timezone: "local", Cwd: "/tmp", Command: "true", MaxConcurrent: 1, Keep: 200},
+		{ID: "set", Kind: "cli", Cron: "0 0 * * *", Timezone: "local", Cwd: "/tmp", Command: "true", MaxConcurrent: 1, Keep: 200, TimeoutSeconds: 600},
+	} {
+		if err := st.CreateJob(ctx, j); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unset, _ := st.GetJob(ctx, "unset")
+	set, _ := st.GetJob(ctx, "set")
+	if unset.Timeout() != DefaultTimeout || set.Timeout() != 10*time.Minute {
+		t.Fatalf("timeouts: unset=%s set=%s, want %s/10m", unset.Timeout(), set.Timeout(), DefaultTimeout)
+	}
+}

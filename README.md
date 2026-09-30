@@ -45,6 +45,12 @@ An `agent` job runs one non-interactive turn of [Claude Code](https://claude.com
 
 Then `jobtail` opens the dashboard.
 
+## Runs that don't finish
+
+Every run has a timeout: 30 minutes unless the job sets `--timeout-seconds`. Past it, jobtail kills the run's whole process group — the command *and* anything it spawned — and records it as `timeout`.
+
+A job doesn't overlap itself by default (`--max-concurrent 1`): if its previous run is still going when it's due again, the new one is recorded as `skipped_overlap`. So a run that can't end on its own must not be allowed to look like it's still going. If the process executing a run dies outright — killed, crashed, lost to a reboot — the next tick (or the next `jobtail run`) notices, kills whatever it left behind, and marks the run `failed` (or `timeout`, if it was also past its limit). A dead run never blocks its job for more than a minute.
+
 ## Reading a run
 
 <p align="center"><img src="docs/screenshot.png" alt="the log pane: an agent transcript as folded blocks — tool calls with their output collapsed behind a line count, a folded thinking block, and the run's cost and duration" width="900"></p>

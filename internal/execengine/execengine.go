@@ -101,8 +101,6 @@ type Result struct {
 // stdout+stderr to logPath (capped at LogCapBytes).
 func RunCLI(ctx context.Context, j store.Job, logPath string) (Result, error) {
 	start := time.Now()
-	ctx, cancel := withJobTimeout(ctx, j)
-	defer cancel()
 
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -116,9 +114,13 @@ func RunCLI(ctx context.Context, j store.Job, logPath string) (Result, error) {
 	cmd.Env = childEnv()
 	cmd.Stdout = w
 	cmd.Stderr = w
-	cmd.Cancel = terminateThenKill(cmd)
+	ownProcessGroup(cmd)
 
-	err = cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return Result{}, err
+	}
+	notifyStart(ctx, cmd)
+	err = cmd.Wait()
 	return classifyExit(ctx, cmd, err, start)
 }
 
@@ -165,9 +167,9 @@ func RunPrecheck(ctx context.Context, j store.Job) PrecheckResult {
 	// deadline fired, the result said TimedOut, and cmd.Run went on
 	// blocking until the gate finished by itself: a `sleep 10` gate with a
 	// 1s timeout took 10s and still claimed to have timed out.
-	// terminateThenKill is what the job run paths already use — SIGTERM,
-	// then SIGKILL if that is ignored.
-	cmd.Cancel = terminateThenKill(cmd)
+	// ownProcessGroup is what the job run paths already use — SIGTERM to the
+	// gate's whole process group, then SIGKILL if that is ignored.
+	ownProcessGroup(cmd)
 	// And WaitDelay bounds the tail: output is captured through a pipe
 	// here (a buffer, not a file as the job paths use), and Wait blocks
 	// until every writer closes it — including any grandchild the gate
@@ -175,7 +177,11 @@ func RunPrecheck(ctx context.Context, j store.Job) PrecheckResult {
 	cmd.WaitDelay = 2 * time.Second
 
 	start := time.Now()
-	err := cmd.Run()
+	err := cmd.Start()
+	if err == nil {
+		notifyStart(ctx, cmd)
+		err = cmd.Wait()
+	}
 	elapsed := time.Since(start)
 
 	out := buf.String()
@@ -218,8 +224,6 @@ func RunAgent(ctx context.Context, j store.Job, logPath string, onSessionID func
 // in job.Cwd. The final `result` event's is_error field decides ok/failed.
 func runClaudeAgent(ctx context.Context, j store.Job, logPath string, onSessionID func(sessionID string)) (Result, error) {
 	start := time.Now()
-	ctx, cancel := withJobTimeout(ctx, j)
-	defer cancel()
 
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -256,7 +260,7 @@ func runClaudeAgent(ctx context.Context, j store.Job, logPath string, onSessionI
 	cmd.Dir = j.Cwd
 	cmd.Env = childEnv()
 	cmd.Stderr = w
-	cmd.Cancel = terminateThenKill(cmd)
+	ownProcessGroup(cmd)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -265,6 +269,7 @@ func runClaudeAgent(ctx context.Context, j store.Job, logPath string, onSessionI
 	if err := cmd.Start(); err != nil {
 		return Result{}, err
 	}
+	notifyStart(ctx, cmd)
 
 	sawError := false
 	sawResult := false
@@ -326,8 +331,6 @@ type streamEvent struct {
 // is_error check.
 func runOpenCodeAgent(ctx context.Context, j store.Job, logPath string, onSessionID func(sessionID string)) (Result, error) {
 	start := time.Now()
-	ctx, cancel := withJobTimeout(ctx, j)
-	defer cancel()
 
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -345,7 +348,7 @@ func runOpenCodeAgent(ctx context.Context, j store.Job, logPath string, onSessio
 	cmd.Dir = j.Cwd
 	cmd.Env = childEnv()
 	cmd.Stderr = w
-	cmd.Cancel = terminateThenKill(cmd)
+	ownProcessGroup(cmd)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -354,6 +357,7 @@ func runOpenCodeAgent(ctx context.Context, j store.Job, logPath string, onSessio
 	if err := cmd.Start(); err != nil {
 		return Result{}, err
 	}
+	notifyStart(ctx, cmd)
 
 	sawError := false
 	gotSessionID := false
@@ -415,8 +419,6 @@ type openCodeEvent struct {
 // danger-full-access unless a job explicitly opts in).
 func runCodexAgent(ctx context.Context, j store.Job, logPath string, onSessionID func(sessionID string)) (Result, error) {
 	start := time.Now()
-	ctx, cancel := withJobTimeout(ctx, j)
-	defer cancel()
 
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -439,7 +441,7 @@ func runCodexAgent(ctx context.Context, j store.Job, logPath string, onSessionID
 	cmd.Dir = j.Cwd
 	cmd.Env = childEnv()
 	cmd.Stderr = w
-	cmd.Cancel = terminateThenKill(cmd)
+	ownProcessGroup(cmd)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -448,6 +450,7 @@ func runCodexAgent(ctx context.Context, j store.Job, logPath string, onSessionID
 	if err := cmd.Start(); err != nil {
 		return Result{}, err
 	}
+	notifyStart(ctx, cmd)
 
 	sawError := false
 	gotThreadID := false
@@ -488,35 +491,81 @@ type codexEvent struct {
 	ThreadID string `json:"thread_id"`
 }
 
-func withJobTimeout(ctx context.Context, j store.Job) (context.Context, context.CancelFunc) {
-	if j.TimeoutSeconds <= 0 {
-		return context.WithCancel(ctx)
-	}
-	return context.WithTimeout(ctx, time.Duration(j.TimeoutSeconds)*time.Second)
+// startHookKey carries the callback WithStartHook installs.
+type startHookKey struct{}
+
+// WithStartHook returns a context under which every process execengine
+// starts — the precheck gate as well as the job — is reported to fn by pid
+// as soon as it is running. The runner records it so that a run can still
+// be killed by a different jobtail process if the one executing it dies or
+// wedges (runner.ReapStale). A context value rather than a parameter because
+// it cuts across every entry point here, precheck included.
+func WithStartHook(ctx context.Context, fn func(pid int)) context.Context {
+	return context.WithValue(ctx, startHookKey{}, fn)
 }
 
-// terminateThenKill gives a job's process group SIGTERM, then SIGKILL after
-// a short grace period, instead of Go's default immediate SIGKILL on ctx
-// cancellation.
-func terminateThenKill(cmd *exec.Cmd) func() error {
-	return func() error {
+func notifyStart(ctx context.Context, cmd *exec.Cmd) {
+	if fn, ok := ctx.Value(startHookKey{}).(func(pid int)); ok && fn != nil && cmd.Process != nil {
+		fn(cmd.Process.Pid)
+	}
+}
+
+// killGrace is how long a process group gets between SIGTERM and SIGKILL.
+const killGrace = 5 * time.Second
+
+// ownProcessGroup starts cmd as the leader of a new process group and makes
+// ctx cancellation (the job's max time, or an interrupted `jobtail run`)
+// stop the whole group: SIGTERM, then SIGKILL after killGrace if anything
+// is still there. Signalling only the direct child, as this used to, left
+// behind whatever it had spawned — `sh -c` running a pipeline, an agent
+// CLI's own tool subprocesses — still holding the job's resources after
+// the run had been recorded as over.
+func ownProcessGroup(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
 		}
-		_ = cmd.Process.Signal(syscall.SIGTERM)
+		pgid := cmd.Process.Pid
+		_ = syscall.Kill(-pgid, syscall.SIGTERM)
 		go func() {
-			t := time.NewTimer(5 * time.Second)
-			defer t.Stop()
-			done := make(chan struct{})
-			go func() { _, _ = cmd.Process.Wait(); close(done) }()
-			select {
-			case <-done:
-			case <-t.C:
-				_ = cmd.Process.Signal(syscall.SIGKILL)
-			}
+			time.Sleep(killGrace)
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		}()
 		return nil
 	}
+}
+
+// KillProcessGroup stops a process group from outside the process that
+// started it: SIGTERM, up to killGrace for it to exit, then SIGKILL. It
+// reports whether the group existed at all. Used by the reaper on runs whose
+// own executor is gone or has overrun, where there is no exec.Cmd to cancel.
+func KillProcessGroup(pgid int) bool {
+	if pgid <= 1 {
+		return false
+	}
+	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
+		return false
+	}
+	deadline := time.Now().Add(killGrace)
+	for time.Now().Before(deadline) {
+		if syscall.Kill(-pgid, 0) != nil {
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	return true
+}
+
+// ProcessAlive reports whether pid names a live process. EPERM counts as
+// alive: the process exists, it just isn't ours to signal.
+func ProcessAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 func classifyExit(ctx context.Context, cmd *exec.Cmd, runErr error, start time.Time) (Result, error) {

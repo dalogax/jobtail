@@ -78,9 +78,25 @@ func additiveMigrations(db *sql.DB) error {
 		return err
 	}
 	// precheck_timeout_seconds bounds the gate itself; empty/NULL means
-	// "no timeout", mirroring timeout_seconds.
+	// "no timeout".
 	if err := addColumnIfMissing(db, "jobs", "precheck_timeout_seconds", "INTEGER"); err != nil {
 		return err
+	}
+	// runner_pid, child_pid and exec_started_at are what lets a run that
+	// never finishes be told apart from one that is merely slow (see
+	// ActiveRuns). runner_pid is the jobtail process executing the run
+	// (run-exec, `jobtail run`, or the dashboard); child_pid is the job's
+	// own process, which leads its own process group so it can be killed
+	// along with everything it spawned; exec_started_at is when execution
+	// actually began, as opposed to started_at's nominal cron slot.
+	for _, c := range [][2]string{
+		{"runner_pid", "INTEGER"},
+		{"child_pid", "INTEGER"},
+		{"exec_started_at", "TEXT"},
+	} {
+		if err := addColumnIfMissing(db, "runs", c[0], c[1]); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -133,7 +149,10 @@ type Job struct {
 	Provider       string
 	PermissionMode string
 	MaxConcurrent  int
-	TimeoutSeconds int64 // 0 = no timeout
+	// TimeoutSeconds is how long a run may take before jobtail kills it
+	// and records it as "timeout". 0 means DefaultTimeout — there is no
+	// "unlimited": a run that never ends would block the job forever.
+	TimeoutSeconds int64
 	Keep           int
 	// Precheck is an optional shell gate (run like Command, via sh -c in
 	// Cwd) evaluated before the job's real execution. "" = no precheck.
@@ -142,6 +161,17 @@ type Job struct {
 	PrecheckTimeoutSeconds int64
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
+}
+
+// DefaultTimeout applies to every job that doesn't set TimeoutSeconds.
+const DefaultTimeout = 30 * time.Minute
+
+// Timeout is the job's effective run time limit.
+func (j Job) Timeout() time.Duration {
+	if j.TimeoutSeconds <= 0 {
+		return DefaultTimeout
+	}
+	return time.Duration(j.TimeoutSeconds) * time.Second
 }
 
 type Run struct {
@@ -507,14 +537,90 @@ func (s *Store) SetRunSessionID(ctx context.Context, runID, sessionID string) er
 	return err
 }
 
+// FinishRun records a run's outcome. Only a run that is still "running"
+// is updated: once the reaper (runner.ReapStale) has finalized a run, the
+// process that was executing it may still get round to reporting — having
+// just been killed by that same reaper, say — and must not overwrite the
+// verdict with a less accurate one. That case returns nil, not an error.
 func (s *Store) FinishRun(ctx context.Context, runID, status string, exitCode int, finishedAt time.Time, durationMs int64) error {
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE runs SET status = ?, exit_code = ?, finished_at = ?, duration_ms = ? WHERE id = ?`,
+		UPDATE runs SET status = ?, exit_code = ?, finished_at = ?, duration_ms = ?
+		WHERE id = ? AND status = 'running'`,
 		status, exitCode, timeToStr(finishedAt), durationMs, runID)
 	if err != nil {
 		return err
 	}
-	return checkRowsAffected(res)
+	if err := checkRowsAffected(res); !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	_, err = s.GetRun(ctx, runID)
+	return err // nil if the run exists and was already finished
+}
+
+// MarkRunExecuting records which process is executing a run and when it
+// actually began. It is what lets ActiveRuns' callers tell a run whose
+// executor died apart from one that is still working.
+func (s *Store) MarkRunExecuting(ctx context.Context, runID string, runnerPID int, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE runs SET runner_pid = ?, exec_started_at = ? WHERE id = ?`,
+		runnerPID, timeToStr(at), runID)
+	return err
+}
+
+// SetRunChildPID records the pid of the process the run is currently
+// waiting on — the precheck gate, then the job itself. That process leads
+// its own process group, so the pid doubles as the group to kill.
+func (s *Store) SetRunChildPID(ctx context.Context, runID string, pid int) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE runs SET child_pid = ? WHERE id = ?`, pid, runID)
+	return err
+}
+
+// ActiveRun is a status='running' run with what is needed to decide
+// whether it is still genuinely running.
+type ActiveRun struct {
+	Run
+	RunnerPID     sql.NullInt64
+	ChildPID      sql.NullInt64
+	ExecStartedAt sql.NullTime
+	// Timeout is the owning job's effective limit.
+	Timeout time.Duration
+}
+
+// ActiveRuns returns every run still marked "running", across all jobs.
+func (s *Store) ActiveRuns(ctx context.Context) ([]ActiveRun, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT r.id, r.job_id, r.trigger, r.started_at, r.log_path,
+		       r.runner_pid, r.child_pid, r.exec_started_at, j.timeout_seconds
+		FROM runs r JOIN jobs j ON j.id = r.job_id
+		WHERE r.status = 'running'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ActiveRun
+	for rows.Next() {
+		var a ActiveRun
+		var startedAt string
+		var execStartedAt sql.NullString
+		var timeoutSeconds sql.NullInt64
+		if err := rows.Scan(&a.ID, &a.JobID, &a.Trigger, &startedAt, &a.LogPath,
+			&a.RunnerPID, &a.ChildPID, &execStartedAt, &timeoutSeconds); err != nil {
+			return nil, err
+		}
+		a.Status = "running"
+		if a.StartedAt, err = strToTime(startedAt); err != nil {
+			return nil, err
+		}
+		if execStartedAt.Valid {
+			t, err := strToTime(execStartedAt.String)
+			if err != nil {
+				return nil, err
+			}
+			a.ExecStartedAt = sql.NullTime{Time: t, Valid: true}
+		}
+		a.Timeout = Job{TimeoutSeconds: timeoutSeconds.Int64}.Timeout()
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) GetRun(ctx context.Context, id string) (Run, error) {
