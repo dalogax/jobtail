@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 
 	"github.com/dalogax/jobtail/internal/cronx"
 	"github.com/dalogax/jobtail/internal/execengine"
+	"github.com/dalogax/jobtail/internal/runner"
 	"github.com/dalogax/jobtail/internal/store"
 )
 
@@ -92,7 +94,7 @@ func resolveCwd(cwd string) (string, error) {
 }
 
 func newAddCmd() *cobra.Command {
-	var kind, cronExpr, cwd, command, prompt, model, provider, permMode, timezone, precheck string
+	var kind, cronExpr, cwd, command, prompt, model, provider, permMode, timezone, precheck, notify string
 	var maxConcurrent, keep int
 	var timeoutSeconds, precheckTimeoutSeconds int64
 
@@ -134,6 +136,10 @@ func newAddCmd() *cobra.Command {
 			if timeoutSeconds < 0 {
 				return fmt.Errorf("--timeout-seconds can't be negative")
 			}
+			notify, err = runner.ParseNotify(notify)
+			if err != nil {
+				return err
+			}
 			if keep <= 0 {
 				keep = 200
 			}
@@ -148,7 +154,7 @@ func newAddCmd() *cobra.Command {
 				ID: id, Kind: kind, Cron: cronExpr, Timezone: timezone, Enabled: true,
 				Cwd: cwd, Command: command, Prompt: prompt, Model: model, Provider: provider, PermissionMode: permMode,
 				MaxConcurrent: maxConcurrent, TimeoutSeconds: timeoutSeconds, Keep: keep,
-				Precheck: precheck, PrecheckTimeoutSeconds: precheckTimeoutSeconds,
+				Precheck: precheck, PrecheckTimeoutSeconds: precheckTimeoutSeconds, Notify: notify,
 			}
 			if err := a.st.CreateJob(context.Background(), j); err != nil {
 				return err
@@ -173,8 +179,14 @@ func newAddCmd() *cobra.Command {
 	cmd.Flags().IntVar(&keep, "keep", 200, "how many past runs to retain")
 	cmd.Flags().StringVar(&precheck, "precheck", "", "shell gate run before execution: exit 0 runs the job (stdout becomes PENDING ITEMS context for agent prompts), exit 1 marks the run skipped, exit >=2 fails it (agent jobs mainly)")
 	cmd.Flags().Int64Var(&precheckTimeoutSeconds, "precheck-timeout-seconds", 0, "hard kill the precheck after N seconds (0 = no timeout)")
+	cmd.Flags().StringVar(&notify, "notify", "", notifyHelp)
 	return cmd
 }
+
+// notifyHelp documents --notify for both add and edit.
+var notifyHelp = "run events that raise a Herdr notification, comma-separated: " +
+	strings.Join(runner.AllEvents, ", ") + " (started = the job began, after its precheck passed); " +
+	"or all, none, default (" + strings.Join(runner.DefaultEvents, ",") + ")"
 
 // timeoutLabel is a job's effective timeout for display, marking the default.
 func timeoutLabel(j store.Job) string {
@@ -275,6 +287,7 @@ func newShowCmd() *cobra.Command {
 			}
 			fmt.Fprintf(out, "max-concurrent:  %d\n", j.MaxConcurrent)
 			fmt.Fprintf(out, "timeout:         %s\n", timeoutLabel(j))
+			fmt.Fprintf(out, "notify:          %s\n", runner.NotifyLabel(j.Notify))
 			fmt.Fprintf(out, "keep:            %d\n", j.Keep)
 			fmt.Fprintln(out, "recent runs:")
 			for _, r := range runs {
@@ -372,7 +385,7 @@ func newEnableCmd(enable bool) *cobra.Command {
 }
 
 func newEditCmd() *cobra.Command {
-	var cronExpr, cwd, command, prompt, model, provider, permMode, timezone, precheck string
+	var cronExpr, cwd, command, prompt, model, provider, permMode, timezone, precheck, notify string
 	var maxConcurrent, keep int
 	var timeoutSeconds, precheckTimeoutSeconds int64
 	cmd := &cobra.Command{
@@ -433,6 +446,13 @@ func newEditCmd() *cobra.Command {
 			if cmd.Flags().Changed("precheck-timeout-seconds") {
 				p.PrecheckTimeoutSeconds = &precheckTimeoutSeconds
 			}
+			if cmd.Flags().Changed("notify") {
+				n, err := runner.ParseNotify(notify)
+				if err != nil {
+					return err
+				}
+				p.Notify = &n
+			}
 			return a.st.EditJob(context.Background(), args[0], p)
 		},
 	}
@@ -449,6 +469,7 @@ func newEditCmd() *cobra.Command {
 	cmd.Flags().IntVar(&keep, "keep", 0, "how many past runs to retain")
 	cmd.Flags().StringVar(&precheck, "precheck", "", "shell gate run before execution (empty string clears it)")
 	cmd.Flags().Int64Var(&precheckTimeoutSeconds, "precheck-timeout-seconds", 0, "hard kill the precheck after N seconds")
+	cmd.Flags().StringVar(&notify, "notify", "", notifyHelp)
 	return cmd
 }
 

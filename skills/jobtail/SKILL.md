@@ -38,7 +38,7 @@ jobtail add <id> --kind agent --cron "<5-field cron>" --cwd <abs dir> --prompt "
   [--provider claude|opencode|codex] [--model <alias>] [--permission-mode <mode>]
 ```
 
-Optional flags for either kind: `--timeout-seconds N` (default 1800, i.e. 30 minutes), `--precheck "<cmd>"`, `--precheck-timeout-seconds N`, `--timezone <IANA name>` (the default is `local`), `--keep N` (runs to retain, default 200), `--max-concurrent N` (default 1).
+Optional flags for either kind: `--timeout-seconds N` (default 1800, i.e. 30 minutes), `--precheck "<cmd>"`, `--precheck-timeout-seconds N`, `--notify <events>` (Herdr notifications, see below), `--timezone <IANA name>` (the default is `local`), `--keep N` (runs to retain, default 200), `--max-concurrent N` (default 1).
 
 Rules the CLI enforces, which you'd otherwise find out one error at a time:
 
@@ -78,7 +78,16 @@ An agent run costs time and tokens. If the job only has work sometimes (new issu
 | `1` | The run is recorded as `skipped`, and the agent never starts |
 | `2` or higher | The run is recorded as `failed` |
 
-For example: `--precheck 'items=$(gh issue list --label bug --state open --json number,title); [ "$items" != "[]" ] || exit 1; echo "$items"'`. Write the prompt so it works on the pending items it's given. Set `--precheck-timeout-seconds` too.
+For example: `--precheck 'items=$(gh issue list --label bug --state open --json number,title); [ "$items" != "[]" ] || exit 1; echo "$items"'`. Write the prompt so it works on the pending items it's given. Set `--precheck-timeout-seconds` too. If the user wants to know when the gate finds work, add `--notify started,failed,timeout`.
+
+### Notifications
+
+If `herdr` is on `PATH`, run events raise Herdr desktop notifications. `--notify` takes a comma-separated list of events:
+
+- `started`: the job began. For a job with a precheck, this means the precheck passed.
+- `ok`, `failed`, `timeout`, `skipped`, `skipped_overlap`: the run ended with that status.
+
+It also accepts `all`, `none`, or `default`. With no `--notify`, a job notifies on `failed,timeout`. Only add events the user asked for: a job that notifies `ok` every 15 minutes is noise. `edit --notify default` restores the default.
 
 ### Test it before you walk away
 

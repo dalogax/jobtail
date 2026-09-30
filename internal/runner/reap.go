@@ -79,7 +79,7 @@ func ReapStale(ctx context.Context, st *store.Store, now time.Time) ([]Reaped, e
 		if err := st.FinishRun(ctx, a.ID, r.Status, -1, now, dur.Milliseconds()); err != nil {
 			return out, err
 		}
-		notifyFailure(a.JobID, r.Status)
+		Notify(a.JobID, a.Notify, r.Status, "reaped: "+r.Reason)
 		out = append(out, r)
 	}
 	return out, nil

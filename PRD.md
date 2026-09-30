@@ -198,7 +198,7 @@ command = ["jobtail", "run", "--picker"]
 
 If added: for local dev, `herdr plugin link ~/workspace/jobtail`; a keybinding opens the dashboard tab (`[[keys.command]]` in `config.toml`, same pattern `herdr-sched` uses), e.g. `prefix+shift+j`. Treat this as a Phase 4 nice-to-have (§11), decided after living with the plain-tab version for a while, not an up-front commitment.
 
-- On any run finishing with `status='failed'` or `'timeout'`, `jobtail run-exec` shells out to `herdr notification show "jobtail: <job-id> failed" --sound request` — this is a plain CLI call at the end of the run and needs no plugin registration either way.
+- On any run finishing with `status='failed'` or `'timeout'`, `jobtail run-exec` shells out to `herdr notification show "jobtail: <job-id> failed" --sound request` — this is a plain CLI call at the end of the run and needs no plugin registration either way. Which events notify is configurable per job since §22; failed/timeout remains the default.
 - Deliberately *not* using Herdr's `[[events]]` hooks or the socket API for v1 — nothing about scheduling needs to react to Herdr events, and the socket API has no auth beyond filesystem permissions, so keeping jobtail's own data path independent of it is simpler and doesn't add a dependency on the server being up.
 
 ## 9. TUI spec
@@ -529,7 +529,7 @@ A job may carry an optional `precheck`: a shell command run in the job's `cwd` b
 
 The motivating shape is an agent job that should only spend a turn when there is something to work on — query a backlog, exit 1 when it is empty, otherwise print the items and let the agent act on exactly those. Splitting "is there anything to do" from "do it" keeps the expensive, non-deterministic half from running on an empty queue, and means the cheap half stays an ordinary shell command that can be tested on its own.
 
-`skipped` is deliberately distinct from `skipped_overlap`: the latter means the previous run was still going, which is a scheduling condition, while this one means the gate looked and found nothing, which is a normal successful outcome. Neither notifies (§8 only notifies on `failed`/`timeout`).
+`skipped` is deliberately distinct from `skipped_overlap`: the latter means the previous run was still going, which is a scheduling condition, while this one means the gate looked and found nothing, which is a normal successful outcome. Neither notifies by default (§8 notifies on `failed`/`timeout`), though a job can opt into either — and into `started`, which for a gated job means "the gate found work" — with `--notify` (§22).
 
 **The gate's transcript is always written to the run's log**, whatever it decides — a skipped run that showed nothing at all would be indistinguishable from a broken one. That is why the four execution paths open the log with `O_APPEND` rather than `os.Create`: the gate's section is written first and the job's own output lands underneath it. `runner.Execute` truncates the log once up front so that re-executing the same run id still replaces the previous attempt rather than piling onto it, which `os.Create` used to guarantee for free.
 
@@ -604,3 +604,24 @@ The reaper never kills the runner itself, which may be the user's dashboard or t
 - **Child group:** a recycled pid would have to have become a process-group leader in the meantime, and it is only ever signalled for a run that is already dead or overdue.
 
 Recording process start times would close the gap, at the cost of per-platform code (`/proc` on Linux, `sysctl` on macOS) for a failure nobody has observed.
+
+## 22. Configurable notifications
+
+Notifying only on `failed`/`timeout` (§8) answers "is anything broken?", but not the question a precheck-gated agent job raises: *did it find something?* A gate that passes means an agent is now working on the user's repo, and that is worth a toast even though nothing failed.
+
+Each job carries a `notify` column: a comma-separated list of the run events that raise a Herdr notification.
+
+| Event | Fires when | Sound |
+|---|---|---|
+| `started` | the job itself begins — after its precheck passed, if it has one; never for a run the gate skipped | none |
+| `ok` | the run finished `ok` | `done` |
+| `failed` | the run finished `failed`, including a reaped run (§21) | `request` |
+| `timeout` | the run was killed at its timeout, including a reaped run (§21) | `request` |
+| `skipped` | the precheck exited 1 | none |
+| `skipped_overlap` | the run was not started because the previous one was still going | none |
+
+`--notify` also takes `all`, `none` and `default`. `NULL` means the default, `failed,timeout` — exactly the pre-existing behaviour — so existing jobs need no backfill and a job that never chose follows the default if it changes. Lists are validated against the known events (a typo would otherwise silently never fire) and stored in canonical order.
+
+The notification title stays `jobtail: <job-id> <event>`, the shape it always had, and a `--body` carries the detail: the exit code and duration, the timeout that was hit, "precheck passed", or the reaper's reason. Only failures use the attention-grabbing `request` sound; opting into frequent informational events should not mean being paged by them.
+
+`started` is raised in `runner.Execute` right after the gate passes, and the status events in `runner.Finish` and the reaper. `skipped_overlap` is the odd one out: it is decided in `store.StartRun`, before any of that code runs, so its three callers (`tick`, `run`, the dashboard's run-now) raise it through `runner.NotifyOverlap`. As before, everything is best-effort — skipped silently without `herdr` on `PATH` or with `JOBTAIL_DISABLE_NOTIFY` set.

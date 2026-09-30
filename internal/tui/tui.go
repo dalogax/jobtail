@@ -534,6 +534,7 @@ func runNowCmd(ctx context.Context, st *store.Store, j store.Job, logsDir string
 			return runFinishedMsg{jobID: j.ID}
 		}
 		if run.Status == "skipped_overlap" {
+			runner.NotifyOverlap(j)
 			return runFinishedMsg{jobID: j.ID}
 		}
 		res, runErr := runner.Execute(ctx, st, j, runID, logPath)
