@@ -82,6 +82,13 @@ func additiveMigrations(db *sql.DB) error {
 	if err := addColumnIfMissing(db, "jobs", "precheck_timeout_seconds", "INTEGER"); err != nil {
 		return err
 	}
+	// notify is the comma-separated list of run events that raise a Herdr
+	// notification for this job (see runner.NotifyEvents). empty/NULL means
+	// the default — failed and timeout, which is what every job did before
+	// it was configurable — so existing jobs need no backfill.
+	if err := addColumnIfMissing(db, "jobs", "notify", "TEXT"); err != nil {
+		return err
+	}
 	// runner_pid, child_pid and exec_started_at are what lets a run that
 	// never finishes be told apart from one that is merely slow (see
 	// ActiveRuns). runner_pid is the jobtail process executing the run
@@ -159,8 +166,12 @@ type Job struct {
 	Precheck string
 	// PrecheckTimeoutSeconds bounds the precheck itself; 0 = no timeout.
 	PrecheckTimeoutSeconds int64
-	CreatedAt              time.Time
-	UpdatedAt              time.Time
+	// Notify lists the run events that raise a Herdr notification,
+	// comma-separated ("started,failed"). "" means the default (failed and
+	// timeout), "none" turns them off. See runner.NotifyEvents.
+	Notify    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // DefaultTimeout applies to every job that doesn't set TimeoutSeconds.
@@ -240,14 +251,14 @@ func (s *Store) CreateJob(ctx context.Context, j Job) error {
 	now := timeToStr(time.Now())
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO jobs (id, kind, cron, timezone, enabled, cwd, command, prompt, model, provider,
-			permission_mode, max_concurrent, timeout_seconds, keep, precheck, precheck_timeout_seconds,
+			permission_mode, max_concurrent, timeout_seconds, keep, precheck, precheck_timeout_seconds, notify,
 			created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		j.ID, j.Kind, j.Cron, j.Timezone, boolToInt(j.Enabled), j.Cwd,
 		nullableStr(j.Command), nullableStr(j.Prompt), nullableStr(j.Model), nullableStr(j.Provider),
 		nullableStr(j.PermissionMode),
 		j.MaxConcurrent, nullableInt(j.TimeoutSeconds), j.Keep,
-		nullableStr(j.Precheck), nullableInt(j.PrecheckTimeoutSeconds), now, now)
+		nullableStr(j.Precheck), nullableInt(j.PrecheckTimeoutSeconds), nullableStr(j.Notify), now, now)
 	return err
 }
 
@@ -255,7 +266,7 @@ func (s *Store) GetJob(ctx context.Context, id string) (Job, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, kind, cron, timezone, enabled, cwd, command, prompt, model, provider,
 		       permission_mode, max_concurrent, timeout_seconds, keep,
-		       precheck, precheck_timeout_seconds, created_at, updated_at
+		       precheck, precheck_timeout_seconds, notify, created_at, updated_at
 		FROM jobs WHERE id = ?`, id)
 	return scanJob(row)
 }
@@ -263,12 +274,12 @@ func (s *Store) GetJob(ctx context.Context, id string) (Job, error) {
 func scanJob(row *sql.Row) (Job, error) {
 	var j Job
 	var enabled int
-	var command, prompt, model, provider, permMode, precheck sql.NullString
+	var command, prompt, model, provider, permMode, precheck, notify sql.NullString
 	var timeoutSeconds, precheckTimeout sql.NullInt64
 	var createdAt, updatedAt string
 	err := row.Scan(&j.ID, &j.Kind, &j.Cron, &j.Timezone, &enabled, &j.Cwd, &command, &prompt, &model, &provider,
 		&permMode, &j.MaxConcurrent, &timeoutSeconds, &j.Keep,
-		&precheck, &precheckTimeout, &createdAt, &updatedAt)
+		&precheck, &precheckTimeout, &notify, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Job{}, ErrNotFound
 	}
@@ -284,6 +295,7 @@ func scanJob(row *sql.Row) (Job, error) {
 	j.TimeoutSeconds = timeoutSeconds.Int64
 	j.Precheck = precheck.String
 	j.PrecheckTimeoutSeconds = precheckTimeout.Int64
+	j.Notify = notify.String
 	j.CreatedAt, err = strToTime(createdAt)
 	if err != nil {
 		return Job{}, err
@@ -307,7 +319,7 @@ func scanJob(row *sql.Row) (Job, error) {
 func (s *Store) ListJobs(ctx context.Context) ([]JobSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT j.id, j.kind, j.cron, j.timezone, j.enabled, j.cwd, j.command, j.prompt, j.model, j.provider,
-		       j.permission_mode, j.max_concurrent, j.timeout_seconds, j.keep, j.precheck, j.precheck_timeout_seconds,
+		       j.permission_mode, j.max_concurrent, j.timeout_seconds, j.keep, j.precheck, j.precheck_timeout_seconds, j.notify,
 		       j.created_at, j.updated_at,
 		       (SELECT COUNT(*) FROM runs r WHERE r.job_id = j.id) AS run_count,
 		       (SELECT r2.status FROM runs r2 WHERE r2.job_id = j.id ORDER BY r2.started_at DESC LIMIT 1) AS last_status,
@@ -322,11 +334,11 @@ func (s *Store) ListJobs(ctx context.Context) ([]JobSummary, error) {
 	for rows.Next() {
 		var js JobSummary
 		var enabled int
-		var command, prompt, model, provider, permMode, precheck, lastStatus, lastRunAt sql.NullString
+		var command, prompt, model, provider, permMode, precheck, notify, lastStatus, lastRunAt sql.NullString
 		var timeoutSeconds, precheckTimeout sql.NullInt64
 		var createdAt, updatedAt string
 		if err := rows.Scan(&js.ID, &js.Kind, &js.Cron, &js.Timezone, &enabled, &js.Cwd, &command, &prompt, &model, &provider,
-			&permMode, &js.MaxConcurrent, &timeoutSeconds, &js.Keep, &precheck, &precheckTimeout,
+			&permMode, &js.MaxConcurrent, &timeoutSeconds, &js.Keep, &precheck, &precheckTimeout, &notify,
 			&createdAt, &updatedAt,
 			&js.RunCount, &lastStatus, &lastRunAt); err != nil {
 			return nil, err
@@ -340,6 +352,7 @@ func (s *Store) ListJobs(ctx context.Context) ([]JobSummary, error) {
 		js.TimeoutSeconds = timeoutSeconds.Int64
 		js.Precheck = precheck.String
 		js.PrecheckTimeoutSeconds = precheckTimeout.Int64
+		js.Notify = notify.String
 		js.LastStatus = lastStatus.String
 		if js.CreatedAt, err = strToTime(createdAt); err != nil {
 			return nil, err
@@ -418,6 +431,7 @@ type JobPatch struct {
 	Keep                   *int
 	Precheck               *string
 	PrecheckTimeoutSeconds *int64
+	Notify                 *string
 }
 
 func (s *Store) EditJob(ctx context.Context, id string, p JobPatch) error {
@@ -464,13 +478,16 @@ func (s *Store) EditJob(ctx context.Context, id string, p JobPatch) error {
 	if p.PrecheckTimeoutSeconds != nil {
 		j.PrecheckTimeoutSeconds = *p.PrecheckTimeoutSeconds
 	}
+	if p.Notify != nil {
+		j.Notify = *p.Notify
+	}
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE jobs SET cron=?, timezone=?, cwd=?, command=?, prompt=?, model=?, provider=?, permission_mode=?,
-			max_concurrent=?, timeout_seconds=?, keep=?, precheck=?, precheck_timeout_seconds=?, updated_at=?
+			max_concurrent=?, timeout_seconds=?, keep=?, precheck=?, precheck_timeout_seconds=?, notify=?, updated_at=?
 		WHERE id=?`,
 		j.Cron, j.Timezone, j.Cwd, nullableStr(j.Command), nullableStr(j.Prompt), nullableStr(j.Model),
 		nullableStr(j.Provider), nullableStr(j.PermissionMode), j.MaxConcurrent, nullableInt(j.TimeoutSeconds), j.Keep,
-		nullableStr(j.Precheck), nullableInt(j.PrecheckTimeoutSeconds),
+		nullableStr(j.Precheck), nullableInt(j.PrecheckTimeoutSeconds), nullableStr(j.Notify),
 		timeToStr(time.Now()), id)
 	return err
 }
@@ -527,7 +544,7 @@ func (s *Store) getJobTx(ctx context.Context, tx *sql.Tx, id string) (Job, error
 	row := tx.QueryRowContext(ctx, `
 		SELECT id, kind, cron, timezone, enabled, cwd, command, prompt, model, provider,
 		       permission_mode, max_concurrent, timeout_seconds, keep,
-		       precheck, precheck_timeout_seconds, created_at, updated_at
+		       precheck, precheck_timeout_seconds, notify, created_at, updated_at
 		FROM jobs WHERE id = ?`, id)
 	return scanJob(row)
 }
@@ -583,13 +600,15 @@ type ActiveRun struct {
 	ExecStartedAt sql.NullTime
 	// Timeout is the owning job's effective limit.
 	Timeout time.Duration
+	// Notify is the owning job's notification setting (Job.Notify).
+	Notify string
 }
 
 // ActiveRuns returns every run still marked "running", across all jobs.
 func (s *Store) ActiveRuns(ctx context.Context) ([]ActiveRun, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT r.id, r.job_id, r.trigger, r.started_at, r.log_path,
-		       r.runner_pid, r.child_pid, r.exec_started_at, j.timeout_seconds
+		       r.runner_pid, r.child_pid, r.exec_started_at, j.timeout_seconds, j.notify
 		FROM runs r JOIN jobs j ON j.id = r.job_id
 		WHERE r.status = 'running'`)
 	if err != nil {
@@ -602,8 +621,9 @@ func (s *Store) ActiveRuns(ctx context.Context) ([]ActiveRun, error) {
 		var startedAt string
 		var execStartedAt sql.NullString
 		var timeoutSeconds sql.NullInt64
+		var notify sql.NullString
 		if err := rows.Scan(&a.ID, &a.JobID, &a.Trigger, &startedAt, &a.LogPath,
-			&a.RunnerPID, &a.ChildPID, &execStartedAt, &timeoutSeconds); err != nil {
+			&a.RunnerPID, &a.ChildPID, &execStartedAt, &timeoutSeconds, &notify); err != nil {
 			return nil, err
 		}
 		a.Status = "running"
@@ -618,6 +638,7 @@ func (s *Store) ActiveRuns(ctx context.Context) ([]ActiveRun, error) {
 			a.ExecStartedAt = sql.NullTime{Time: t, Valid: true}
 		}
 		a.Timeout = Job{TimeoutSeconds: timeoutSeconds.Int64}.Timeout()
+		a.Notify = notify.String
 		out = append(out, a)
 	}
 	return out, rows.Err()
@@ -729,7 +750,7 @@ func (s *Store) EnabledJobs(ctx context.Context) ([]Job, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, kind, cron, timezone, enabled, cwd, command, prompt, model, provider,
 		       permission_mode, max_concurrent, timeout_seconds, keep,
-		       precheck, precheck_timeout_seconds, created_at, updated_at
+		       precheck, precheck_timeout_seconds, notify, created_at, updated_at
 		FROM jobs WHERE enabled = 1 ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -739,12 +760,12 @@ func (s *Store) EnabledJobs(ctx context.Context) ([]Job, error) {
 	for rows.Next() {
 		var j Job
 		var enabled int
-		var command, prompt, model, provider, permMode, precheck sql.NullString
+		var command, prompt, model, provider, permMode, precheck, notify sql.NullString
 		var timeoutSeconds, precheckTimeout sql.NullInt64
 		var createdAt, updatedAt string
 		if err := rows.Scan(&j.ID, &j.Kind, &j.Cron, &j.Timezone, &enabled, &j.Cwd, &command, &prompt, &model, &provider,
 			&permMode, &j.MaxConcurrent, &timeoutSeconds, &j.Keep,
-			&precheck, &precheckTimeout, &createdAt, &updatedAt); err != nil {
+			&precheck, &precheckTimeout, &notify, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		j.Enabled = enabled != 0
@@ -756,6 +777,7 @@ func (s *Store) EnabledJobs(ctx context.Context) ([]Job, error) {
 		j.TimeoutSeconds = timeoutSeconds.Int64
 		j.Precheck = precheck.String
 		j.PrecheckTimeoutSeconds = precheckTimeout.Int64
+		j.Notify = notify.String
 		if j.CreatedAt, err = strToTime(createdAt); err != nil {
 			return nil, err
 		}

@@ -46,6 +46,7 @@ func newRunCmd() *cobra.Command {
 			logPath := a.logPath(runID)
 			run, err := a.st.StartRun(ctx, j.ID, runID, "manual", logPath, time.Now())
 			if errors.Is(err, store.ErrOverlap) {
+				runner.NotifyOverlap(j)
 				fmt.Fprintf(cmd.OutOrStdout(), "skipped: %s already has a run in progress (run %s)\n", j.ID, run.ID)
 				return nil
 			}
@@ -160,6 +161,7 @@ func newTickCmd() *cobra.Command {
 					return err
 				}
 				if run.Status == "skipped_overlap" {
+					runner.NotifyOverlap(j)
 					fmt.Fprintf(cmd.OutOrStdout(), "skipped %s: already running\n", j.ID)
 					continue
 				}

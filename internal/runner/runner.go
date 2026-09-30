@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -78,6 +77,9 @@ func execute(ctx context.Context, st *store.Store, j store.Job, runID, logPath s
 		}
 		// Gate passed: give the agent the pending items the gate found.
 		j.Prompt = appendPrecheckContext(j.Prompt, pc.Output)
+		Notify(j.ID, j.Notify, EventStarted, "precheck passed; "+j.Kind+" job running")
+	} else {
+		Notify(j.ID, j.Notify, EventStarted, j.Kind+" job running")
 	}
 	switch j.Kind {
 	case "cli":
@@ -152,10 +154,8 @@ func appendPrecheckContext(prompt, output string) string {
 	return prompt + "\n\n--- PENDING ITEMS (from precheck) ---\n" + trimmed
 }
 
-// Finish records the outcome and, on failure, tries a Herdr desktop
-// notification (best-effort: silently skipped if herdr isn't on PATH, or if
-// JOBTAIL_DISABLE_NOTIFY is set — used by the e2e suite so intentionally
-// failing test jobs don't spam real Herdr toasts on the dev box).
+// Finish records the outcome and raises a Herdr notification for it if the
+// job's notify setting asks for that status (by default: failed, timeout).
 func Finish(ctx context.Context, st *store.Store, j store.Job, runID string, res execengine.Result, runErr error) error {
 	// An interrupted run is still a run that happened: its cancelled ctx
 	// must not stop the outcome from being written.
@@ -167,19 +167,26 @@ func Finish(ctx context.Context, st *store.Store, j store.Job, runID string, res
 	if err := st.FinishRun(ctx, runID, status, res.ExitCode, time.Now(), res.Duration.Milliseconds()); err != nil {
 		return err
 	}
-	if status == "failed" || status == "timeout" {
-		notifyFailure(j.ID, status)
-	}
+	Notify(j.ID, j.Notify, status, finishBody(j, status, res))
 	return runErr
 }
 
-func notifyFailure(jobID, status string) {
-	if os.Getenv("JOBTAIL_DISABLE_NOTIFY") != "" {
-		return
+func finishBody(j store.Job, status string, res execengine.Result) string {
+	took := res.Duration.Round(time.Second).String()
+	switch status {
+	case EventFailed:
+		return fmt.Sprintf("exit %d after %s", res.ExitCode, took)
+	case EventTimeout:
+		return fmt.Sprintf("killed after its timeout of %s", j.Timeout())
+	case EventSkipped:
+		return "precheck found nothing to do"
+	default:
+		return "finished in " + took
 	}
-	if _, err := exec.LookPath("herdr"); err != nil {
-		return
-	}
-	_ = exec.Command("herdr", "notification", "show",
-		fmt.Sprintf("jobtail: %s %s", jobID, status), "--sound", "request").Run()
+}
+
+// NotifyOverlap reports a run recorded as skipped_overlap, for callers of
+// store.StartRun — the one outcome that never reaches Execute or Finish.
+func NotifyOverlap(j store.Job) {
+	Notify(j.ID, j.Notify, EventSkippedOverlap, "previous run still going")
 }

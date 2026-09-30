@@ -110,6 +110,8 @@ jobtail add triage-backlog --kind agent --cron "0 * * * *" \
 
 Exit `0` and the job runs, with the precheck's output appended to the prompt as `PENDING ITEMS`. Exit `1` and the run is marked **skipped** — the agent never starts. Anything else marks it **failed**. The cheap deterministic half stays an ordinary shell command you can test on its own; the expensive half only runs when the answer is yes, on exactly what the gate found.
 
+Add `--notify started,failed,timeout` to get a Herdr notification when the gate finds work and the agent starts, not only when something breaks.
+
 The precheck's output is always written to the run's log, so a skipped run still shows what it saw.
 
 <details>
@@ -162,7 +164,7 @@ To check on it: `launchctl print gui/$(id -u)/com.github.dalogax.jobtail.tick`. 
 
 [Herdr](https://herdr.dev) is a terminal workspace manager built around AI coding agent panes. jobtail isn't a Herdr plugin and doesn't need one — it's just a command that runs in any tab or pane. If you do use Herdr, two things light up on their own:
 
-- A failed run fires a `herdr notification` — a desktop toast even when you're not looking at the dashboard.
+- A failed or timed-out run fires a `herdr notification` — a desktop toast even when you're not looking at the dashboard. Pick which events notify per job with `--notify`, a comma-separated list of `started` (the job began — after its precheck passed, if it has one), `ok`, `failed`, `timeout`, `skipped` and `skipped_overlap`; or `all`, `none`, or `default` (`failed,timeout`).
 - Resuming a run opens the session in a new Herdr tab, instead of printing instructions.
 
 Neither needs setup: jobtail looks for `herdr` on `PATH` at the moment it'd be useful and skips both silently if it isn't there.
