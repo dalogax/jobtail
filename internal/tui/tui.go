@@ -528,6 +528,7 @@ func runNowCmd(ctx context.Context, st *store.Store, j store.Job, logsDir string
 	return func() tea.Msg {
 		runID := newRunID()
 		logPath := logsDir + "/" + runID + ".log"
+		_, _ = runner.ReapStale(ctx, st, time.Now()) // a stuck run must not block "run now"
 		run, err := st.StartRun(ctx, j.ID, runID, "manual", logPath, time.Now())
 		if err != nil && err != store.ErrOverlap {
 			return runFinishedMsg{jobID: j.ID}

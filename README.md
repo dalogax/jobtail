@@ -37,13 +37,27 @@ jobtail add backups --kind cli --cron "*/15 * * * *" \
 
 # a headless agent turn
 jobtail add deps-review --kind agent --cron "0 3 * * *" \
-  --cwd ~/code/shop --timeout-seconds 1800 \
+  --cwd ~/code/shop --max-time 45m \
   --prompt "Check for outdated deps. Open a PR if it's safe to update."
 ```
 
 An `agent` job runs one non-interactive turn of [Claude Code](https://claude.com/claude-code), [opencode](https://opencode.ai) or [Codex](https://github.com/openai/codex) — pick with `--provider`, default `claude`. It needs no special environment: a prompt and a working directory, the way a `cli` job needs a command and a working directory.
 
 Then `jobtail` opens the dashboard.
+
+## Runs that don't finish
+
+Every run has a **max time** — 30 minutes unless the job sets `--max-time` (`90s`, `45m`, `2h`). Past it, jobtail kills the run's whole process group — the command *and* anything it spawned — and records it as `timeout`. There's no unlimited: a run that never ends would block its job forever.
+
+By default a job **doesn't overlap itself**: if its previous run is still going when it's due again, the new one is recorded as `skipped_overlap` and doesn't start. Pass `--allow-overlap` for jobs where runs are independent and may stack.
+
+If the process executing a run dies outright — killed, crashed, lost to a reboot — the run can't record its own end. The next tick (or the next `jobtail run`) notices, kills whatever it left behind, and marks it `failed` (or `timeout`, if it was also past its max time), so a dead run never blocks the job for more than a minute.
+
+```sh
+jobtail edit deps-review --max-time 2h        # give a slow job more room
+jobtail edit metrics-push --allow-overlap     # runs may stack
+jobtail edit metrics-push --allow-overlap=false
+```
 
 ## Reading a run
 

@@ -7,6 +7,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -24,6 +25,12 @@ import (
 // exit >=2 (or a gate that could not run / timed out) marks the run
 // "failed". Either early outcome is written to the run's log so the
 // dashboard always shows what the gate decided and why.
+//
+// The whole run, gate included, is bounded by the job's max time: past it
+// the job's process group is killed and the run is recorded as "timeout".
+// The executing process and the job's pid are written to the run row as
+// they become known, so ReapStale can still end the run from another
+// jobtail process if this one dies or wedges before it can.
 func Execute(ctx context.Context, st *store.Store, j store.Job, runID, logPath string) (execengine.Result, error) {
 	// The execengine run paths open the log with O_APPEND so a precheck
 	// section written here survives underneath the job's own output. That
@@ -34,6 +41,30 @@ func Execute(ctx context.Context, st *store.Store, j store.Job, runID, logPath s
 		return execengine.Result{}, err
 	}
 
+	start := time.Now()
+	_ = st.MarkRunExecuting(ctx, runID, os.Getpid(), start)
+	ctx, cancel := context.WithTimeout(ctx, j.MaxTime())
+	defer cancel()
+	ctx = execengine.WithStartHook(ctx, func(pid int) {
+		// Deliberately not ctx: recording the pid must not fail just
+		// because the deadline is already close.
+		_ = st.SetRunChildPID(context.Background(), runID, pid)
+	})
+
+	res, err := execute(ctx, st, j, runID, logPath)
+	if res.Status == "timeout" || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		// Covers a deadline that landed during the precheck, too — the
+		// gate reports that as its own failure, but the limit that fired
+		// was the run's.
+		res.Status = "timeout"
+		res.Duration = time.Since(start)
+		appendLog(logPath, fmt.Sprintf("\n[jobtail] killed: run exceeded its max time of %s\n", j.MaxTime()))
+		return res, nil
+	}
+	return res, err
+}
+
+func execute(ctx context.Context, st *store.Store, j store.Job, runID, logPath string) (execengine.Result, error) {
 	if j.Precheck != "" {
 		pc := execengine.RunPrecheck(ctx, j)
 		if err := writePrecheckLog(logPath, pc); err != nil {
@@ -77,16 +108,24 @@ func writePrecheckLog(logPath string, pc execengine.PrecheckResult) error {
 	if pc.ExitCode == 0 {
 		b.WriteString("[jobtail precheck] passed; starting job\n\n")
 	}
+	return appendLogErr(logPath, b.String())
+}
+
+func appendLogErr(logPath, text string) error {
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}
-	if _, err := f.WriteString(b.String()); err != nil {
+	if _, err := f.WriteString(text); err != nil {
 		f.Close()
 		return err
 	}
 	return f.Close()
 }
+
+// appendLog is appendLogErr for notes about the run's fate, where failing
+// to write the note must not change the outcome being recorded.
+func appendLog(logPath, text string) { _ = appendLogErr(logPath, text) }
 
 // truncateLog creates the run's log, or empties it if it somehow already
 // exists, leaving it for the precheck and then the job to append to.
@@ -118,6 +157,9 @@ func appendPrecheckContext(prompt, output string) string {
 // JOBTAIL_DISABLE_NOTIFY is set — used by the e2e suite so intentionally
 // failing test jobs don't spam real Herdr toasts on the dev box).
 func Finish(ctx context.Context, st *store.Store, j store.Job, runID string, res execengine.Result, runErr error) error {
+	// An interrupted run is still a run that happened: its cancelled ctx
+	// must not stop the outcome from being written.
+	ctx = context.WithoutCancel(ctx)
 	status := res.Status
 	if status == "" {
 		status = "failed"

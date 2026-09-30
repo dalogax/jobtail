@@ -41,7 +41,7 @@ func addJobs(t testing.TB, st *store.Store, prefix string, n int) {
 		if err := st.CreateJob(ctx, store.Job{
 			ID: fmt.Sprintf("%s-%02d", prefix, i), Kind: "cli", Cron: "*/5 * * * *",
 			Timezone: "local", Enabled: true, Cwd: t.TempDir(), Command: "echo hi",
-			MaxConcurrent: 1, Keep: 200,
+			Keep: 200,
 		}); err != nil {
 			t.Fatal(err)
 		}

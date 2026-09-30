@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,11 +31,16 @@ func newRunCmd() *cobra.Command {
 			}
 			defer a.st.Close()
 
-			ctx := context.Background()
+			// Ctrl-C has to reach the job through ctx now: it runs in its own
+			// process group, so the terminal's SIGINT no longer does.
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
 			j, err := a.st.GetJob(ctx, args[0])
 			if err != nil {
 				return err
 			}
+			// Clear out stuck runs first, or one could block this one.
+			reap(ctx, cmd, a.st)
 
 			runID := uuid.NewString()
 			logPath := a.logPath(runID)
@@ -118,6 +125,7 @@ func newTickCmd() *cobra.Command {
 			defer a.st.Close()
 
 			ctx := context.Background()
+			reap(ctx, cmd, a.st)
 			jobs, err := a.st.EnabledJobs(ctx)
 			if err != nil {
 				return err
@@ -184,7 +192,8 @@ func newRunExecCmd() *cobra.Command {
 			}
 			defer a.st.Close()
 
-			ctx := context.Background()
+			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
+			defer stop()
 			r, err := a.st.GetRun(ctx, args[0])
 			if err != nil {
 				return err
@@ -196,6 +205,19 @@ func newRunExecCmd() *cobra.Command {
 			res, runErr := runner.Execute(ctx, a.st, j, r.ID, r.LogPath)
 			return runner.Finish(ctx, a.st, j, r.ID, res, runErr)
 		},
+	}
+}
+
+// reap finalizes runs that can no longer finish by themselves (see
+// runner.ReapStale), reporting each on stdout. A failure is reported and
+// otherwise ignored: it must not stop due jobs from firing.
+func reap(ctx context.Context, cmd *cobra.Command, st *store.Store) {
+	reaped, err := runner.ReapStale(ctx, st, time.Now())
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "jobtail: reaping stale runs: %v\n", err)
+	}
+	for _, r := range reaped {
+		fmt.Fprintf(cmd.OutOrStdout(), "reaped %s run %s: %s (%s)\n", r.JobID, r.RunID, r.Status, r.Reason)
 	}
 }
 

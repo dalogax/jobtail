@@ -78,7 +78,7 @@ No long-running daemon of our own. Two moving parts:
 - **Logs**: one file per run under `~/.local/share/jobtail/logs/<run-id>.log` (cli jobs: raw combined stdout+stderr) or `<run-id>.jsonl` (agent jobs: the `stream-json` transcript, one JSON event per line — same shape Claude Code itself uses, so it's easy to pretty-render).
 - **No server/socket of our own.** The TUI just reads the DB + tails the log file for the currently-open run. This avoids the exact trap `herdr-sched` calls out — "Herdr has no shutdown hook" — since we never start something that has to be stopped; `jobtail tick` and `jobtail run-exec` are ordinary processes that exit on their own, and the TUI is just a pane that closes when its tab closes.
 - **The TUI does not need to be a Herdr plugin to live in a Herdr tab.** Herdr already runs arbitrary commands in panes/tabs (open a tab, run `jobtail tui`). A `herdr-plugin.toml` is optional packaging on top — see §8 — not a requirement for "a tab with the dashboard in it."
-- **Locking**: `jobtail tick` takes an exclusive `BEGIN IMMEDIATE` SQLite transaction per due job before spawning it, so a slow tick and a manual `jobtail run` never double-fire the same job. Default `max_concurrent=1` per job (configurable per job) — if a run is still active when its next scheduled time arrives, the tick skips it and logs a `skipped_overlap` row.
+- **Locking**: `jobtail tick` takes an exclusive `BEGIN IMMEDIATE` SQLite transaction per due job before spawning it, so a slow tick and a manual `jobtail run` never double-fire the same job. By default a job doesn't overlap itself (`allow_overlap=0`) — if a run is still active when its next scheduled time arrives, the tick skips it and logs a `skipped_overlap` row. That only works if "still active" is true, so every run is bounded by a max time and runs whose executor died are reaped — see §21.
 
 ## 6. Data model
 
@@ -95,8 +95,9 @@ CREATE TABLE jobs (
   model         TEXT,                       -- kind='agent': --model (optional)
   provider      TEXT,                       -- kind='agent': 'claude' (default/NULL) | 'opencode' | 'codex'
   permission_mode TEXT,                     -- kind='agent': meaning is provider-specific, see §14
-  max_concurrent INTEGER NOT NULL DEFAULT 1,
-  timeout_seconds INTEGER,                  -- optional hard kill
+  max_concurrent INTEGER NOT NULL DEFAULT 1, -- superseded by allow_overlap, no longer read (§21)
+  timeout_seconds INTEGER,                  -- max time in seconds; NULL = default 30m (§21)
+  allow_overlap INTEGER NOT NULL DEFAULT 0, -- 1 = new runs start even while one is active
   precheck      TEXT,                       -- optional shell gate, see §19
   precheck_timeout_seconds INTEGER,         -- optional hard kill for the gate
   created_at    TEXT NOT NULL,
@@ -242,7 +243,7 @@ Jobs and runs side by side on top, log spanning the full width underneath — no
 
 ## 10. Execution engine
 
-**`cli` jobs**: `exec.Command("sh", "-c", job.command)` with `Dir: job.cwd`, stdout+stderr both piped to the run's log file, `context.WithTimeout` if `timeout_seconds` set. Exit code stored verbatim; non-zero → `status='failed'`.
+**`cli` jobs**: `exec.Command("sh", "-c", job.command)` with `Dir: job.cwd`, stdout+stderr both piped to the run's log file, bounded by the job's max time (§21). Exit code stored verbatim; non-zero → `status='failed'`.
 
 **`agent` jobs**: build and run:
 
@@ -257,7 +258,7 @@ claude -p "<prompt>" \
 
 from `job.cwd`, streaming stdout line-by-line straight into the run's `.jsonl` log. The first `system`/`init` event in the stream carries the session id — captured into `runs.session_id` as soon as it arrives, so a run that later fails is still resumable via `jobtail resume`. Note what is *not* in that invocation: `--no-session-persistence`. It was there from the first commit and silently made resuming impossible for every claude job — see §20. Exit code + the final `result` event's `is_error` field together decide `ok` vs `failed`. `--permission-mode acceptEdits` is the sane default for unattended runs (auto-accepts file edits, still not `bypassPermissions`); `--dangerously-skip-permissions`/`bypassPermissions` is deliberately never the default and only settable explicitly per job for cases that need it (e.g. a fully sandboxed maintenance job). `jobtail resume <run-id>` itself doesn't run headless — it does `herdr tab create` + `pane run <pane> "claude --resume <session_id>"`, handing the session to you interactively rather than trying to make unattended retries smart. The same action is on `r` in the dashboard's runs and log panes (§9), which is where you normally are when you decide a run is worth picking up by hand.
 
-Both kinds: `SIGTERM` then `SIGKILL` after a grace period on timeout; run row gets `status='timeout'`. Log capture is capped at 10MB per run (a truncation marker line is appended and the process is left running — capping the *captured* log, not killing a noisy-but-otherwise-fine job) so one runaway `cli` job can't fill the disk.
+Both kinds: every process runs as the leader of its own process group; on hitting the max time the whole group gets `SIGTERM`, then `SIGKILL` after a grace period, and the run row gets `status='timeout'` (§21). Log capture is capped at 10MB per run (a truncation marker line is appended and the process is left running — capping the *captured* log, not killing a noisy-but-otherwise-fine job) so one runaway `cli` job can't fill the disk.
 
 Cron parsing uses `github.com/robfig/cron/v3`'s parser package only (just schedule math — `Next(t)` — not its scheduler/goroutine, since `jobtail tick` drives its own timing via systemd). Schedules are evaluated in the system's local timezone by default; `jobs.timezone` can override per job with an IANA name (e.g. `UTC`, `Europe/Madrid`) for the rare job that needs to ignore DST shifts.
 
@@ -537,7 +538,7 @@ The motivating shape is an agent job that should only spend a turn when there is
 
 `precheck_timeout_seconds` bounds the gate the way `timeout_seconds` bounds the job, and the first implementation did not work: it set `cmd.Cancel` to a hook that only reported the context's cause. `exec.CommandContext` installs its own `Cancel` that kills the process, and assigning to it *replaces* that kill rather than adding to it — so the deadline fired, the result said `TimedOut: true`, and `cmd.Run` went on blocking until the gate finished by itself. Measured: a `sleep 10` gate with a one-second timeout took 10.003 s and still reported "precheck timed out after 1s". A bound that reports success while not being enforced is worse than no bound, because nothing looks wrong.
 
-It now uses `terminateThenKill`, the same SIGTERM-then-SIGKILL hook the job run paths use. `WaitDelay` is set as well, for a reason specific to this path: the gate's output is captured through a pipe into a buffer (the job paths write to a file descriptor directly), and `Wait` blocks until every writer closes that pipe — including a grandchild the gate left behind, which killing the shell does not reap. The regression test asserts on *elapsed time*, because the reported outcome was already correct while the behaviour was not.
+It now uses the same SIGTERM-then-SIGKILL hook the job run paths use (today `ownProcessGroup`, which signals the gate's whole process group — §21). `WaitDelay` is set as well, for a reason specific to this path: the gate's output is captured through a pipe into a buffer (the job paths write to a file descriptor directly), and `Wait` blocks until every writer closes that pipe — including a grandchild the gate left behind, which killing the shell does not reap. The regression test asserts on *elapsed time*, because the reported outcome was already correct while the behaviour was not.
 
 The gate's measured duration is what a skipped or gate-failed run records, rather than the zero a placeholder helper used to return for every one of them.
 
@@ -563,3 +564,41 @@ Dropping the flag fixes it, verified end to end against the real binary — a he
 The resume logic lives in `internal/resume` rather than in the cobra command, because two callers need it — the CLI and the dashboard — and a second copy would drift. `Possible` is a pure check on data already in hand (agent kind, session id present), so `View` can call it every frame to decide whether to advertise the key at all; `Open` does the PATH lookup and the two `herdr` calls, and runs off the Update goroutine so a wedged herdr can't freeze the dashboard.
 
 What `Possible` deliberately cannot tell you is whether the session is still *on disk*. Nothing in the database can: the id is recorded while the agent is running, and the provider may prune the transcript later. That failure surfaces as the agent CLI's own message in the tab that opens, which is the right place for it.
+
+## 21. Runs that don't finish: overlap and max time
+
+The overlap guard (§5 "Locking") is only as good as the `running` status it counts, and before this change that status could lie forever. Two ways, both seen:
+
+- **A run that hangs.** `timeout_seconds` was optional and unset by default, so an agent turn waiting on an approval nobody would give (the `--permission-mode plan` trap), or a `cli` job stuck on a network call, ran indefinitely.
+- **A run whose executor dies.** `run-exec` killed, OOM-killed, or lost to a reboot never reaches `FinishRun`. Its row stays `running` with nothing left to change it.
+
+Either way, with `max_concurrent=1` every later run was recorded as `skipped_overlap` — the job silently stopped doing anything, and the dashboard showed a yellow "running" that nothing was running.
+
+### Two job settings
+
+| Flag | Column | Default | Meaning |
+|---|---|---|---|
+| `--allow-overlap` | `allow_overlap` | off | Start new runs even while an earlier one is active. Off: record them as `skipped_overlap`. |
+| `--max-time <duration>` | `timeout_seconds` | `30m` | Kill a run that takes longer, and record it as `timeout`. |
+
+`allow_overlap` replaces `max_concurrent`. Nobody needed "at most three at once"; the real question was yes or no, and a count was one more thing to get wrong. The migration carries the old intent over once, when the column is added (`max_concurrent > 1` → `allow_overlap = 1`); the old column stays so an older binary can still open the database. `--max-concurrent` and `--timeout-seconds` are still accepted, hidden and deprecated, and translated to the new flags.
+
+Max time reuses `timeout_seconds`, but `NULL` now means "the default" rather than "none". **There is deliberately no unlimited**: an unbounded run is precisely the failure being fixed, and a job that genuinely needs hours can say so. An unset value stays `NULL` rather than being written as 1800, so a job that never chose a limit follows the default if it ever changes.
+
+### Enforcement, in two layers
+
+**In the executing process.** `runner.Execute` wraps the whole run — precheck included — in a context with the job's max time. A gate that hangs is still the run hanging, so a deadline that lands during the precheck is reported as the run's `timeout`, not as a gate failure. Every child is started with `Setpgid` and cancellation signals the *group*: previously only the direct child was signalled, so `sh -c` running a pipeline, or an agent CLI's own tool subprocesses, survived their run being recorded as over. The log gets a closing `[jobtail] killed: run exceeded its max time of …` line so the dashboard says why.
+
+A side effect of the process group: Ctrl-C at an interactive `jobtail run` no longer reaches the job directly (it isn't in the terminal's foreground group), so `run` now turns SIGINT/SIGTERM into context cancellation, which kills the group the same way, and records the run as `failed`.
+
+**From outside, for when the executing process can't.** Each run row now records `runner_pid` (the jobtail process executing it — `run-exec`, `jobtail run` or the dashboard), `child_pid` (the job's process, which is also its process group) and `exec_started_at` (when execution actually began — `started_at` is the nominal cron slot, see §6, and would make a caught-up run look older than it is). `runner.ReapStale` runs at the top of every `tick`, before every `jobtail run`, and before the dashboard's run-now, and finalizes any `running` row where:
+
+- the runner process no longer exists → `failed` (or `timeout` if also past its max time), or
+- it is more than one minute (`ReapGrace`) past its max time, whatever the runner claims → `timeout`. The grace keeps the reaper from racing the executor's own SIGTERM→SIGKILL. This case also clears rows left behind by versions that recorded no pids at all, so existing installs unblock on the first tick after upgrading.
+
+Either way it kills what is left of the job's process group first, appends a `[jobtail] reaped: <reason>` line to the run's log, and notifies like any other failure (§8). `FinishRun` now only updates a run that is still `running`, so an executor that does get round to reporting after being reaped can't overwrite the verdict.
+
+The reaper never kills the runner itself: that may be the user's dashboard or terminal. It kills the job's group, which lets a merely-wedged runner's `Wait` return and exit normally.
+
+**Accepted risk: pid reuse.** Liveness is `kill(pid, 0)`, which a recycled pid can fool. For the runner that only delays reaping until the overdue rule catches it; for the child group, a recycled pid would have to have become a process-group leader in the meantime, and it is only ever signalled for a run that is already dead or overdue. Recording process start times would close the gap, at the cost of per-platform code (`/proc` on Linux, `sysctl` on macOS) for a failure nobody has observed.
+

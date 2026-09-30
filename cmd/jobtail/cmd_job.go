@@ -91,10 +91,73 @@ func resolveCwd(cwd string) (string, error) {
 	return abs, nil
 }
 
+// maxTimeSeconds validates --max-time and converts it to what the store
+// keeps. There is no "0 = unlimited": an unbounded run is exactly what
+// blocks a job forever.
+func maxTimeSeconds(d time.Duration) (int64, error) {
+	if d < time.Second {
+		return 0, fmt.Errorf("--max-time must be at least 1s, got %s", d)
+	}
+	return int64(d.Round(time.Second) / time.Second), nil
+}
+
+// overlapAndMaxTimeFlags registers --allow-overlap and --max-time, plus the
+// flags they replace — still accepted so existing scripts keep working, but
+// hidden, and translated: --max-concurrent above 1 meant "allow overlap",
+// and --timeout-seconds was --max-time in seconds.
+func overlapAndMaxTimeFlags(cmd *cobra.Command, allowOverlap *bool, maxTime *time.Duration, maxConcurrent *int, timeoutSeconds *int64) {
+	cmd.Flags().BoolVar(allowOverlap, "allow-overlap", false,
+		"start a new run even while a previous run of this job is still active (default: skip it as skipped_overlap)")
+	cmd.Flags().DurationVar(maxTime, "max-time", store.DefaultMaxTime,
+		"kill a run that takes longer than this and record it as timeout, e.g. 90s, 45m, 2h")
+	cmd.Flags().IntVar(maxConcurrent, "max-concurrent", 0, "deprecated: use --allow-overlap")
+	cmd.Flags().Int64Var(timeoutSeconds, "timeout-seconds", 0, "deprecated: use --max-time")
+	_ = cmd.Flags().MarkDeprecated("max-concurrent", "use --allow-overlap instead")
+	_ = cmd.Flags().MarkDeprecated("timeout-seconds", "use --max-time instead")
+}
+
+// resolveOverlapAndMaxTime folds the deprecated flags into the new ones and
+// returns pointers to the values the caller set (nil = not set).
+func resolveOverlapAndMaxTime(cmd *cobra.Command, allowOverlap bool, maxTime time.Duration, maxConcurrent int, timeoutSeconds int64) (*bool, *int64, error) {
+	var overlap *bool
+	var secs *int64
+	if cmd.Flags().Changed("max-concurrent") {
+		v := maxConcurrent > 1
+		overlap = &v
+	}
+	if cmd.Flags().Changed("allow-overlap") {
+		overlap = &allowOverlap
+	}
+	if cmd.Flags().Changed("timeout-seconds") {
+		if timeoutSeconds <= 0 {
+			return nil, nil, fmt.Errorf("--timeout-seconds must be positive; runs can no longer be unbounded (default max time is %s)", store.DefaultMaxTime)
+		}
+		secs = &timeoutSeconds
+	}
+	if cmd.Flags().Changed("max-time") {
+		n, err := maxTimeSeconds(maxTime)
+		if err != nil {
+			return nil, nil, err
+		}
+		secs = &n
+	}
+	return overlap, secs, nil
+}
+
+// maxTimeLabel is a job's max time for display, marking the default.
+func maxTimeLabel(j store.Job) string {
+	if j.MaxTimeSeconds <= 0 {
+		return j.MaxTime().String() + " (default)"
+	}
+	return j.MaxTime().String()
+}
+
 func newAddCmd() *cobra.Command {
 	var kind, cronExpr, cwd, command, prompt, model, provider, permMode, timezone, precheck string
 	var maxConcurrent, keep int
 	var timeoutSeconds, precheckTimeoutSeconds int64
+	var allowOverlap bool
+	var maxTime time.Duration
 
 	cmd := &cobra.Command{
 		Use:   "add <id>",
@@ -128,8 +191,9 @@ func newAddCmd() *cobra.Command {
 			if timezone == "" {
 				timezone = "local"
 			}
-			if maxConcurrent <= 0 {
-				maxConcurrent = 1
+			overlap, maxSecs, err := resolveOverlapAndMaxTime(cmd, allowOverlap, maxTime, maxConcurrent, timeoutSeconds)
+			if err != nil {
+				return err
 			}
 			if keep <= 0 {
 				keep = 200
@@ -144,8 +208,15 @@ func newAddCmd() *cobra.Command {
 			j := store.Job{
 				ID: id, Kind: kind, Cron: cronExpr, Timezone: timezone, Enabled: true,
 				Cwd: cwd, Command: command, Prompt: prompt, Model: model, Provider: provider, PermissionMode: permMode,
-				MaxConcurrent: maxConcurrent, TimeoutSeconds: timeoutSeconds, Keep: keep,
-				Precheck: precheck, PrecheckTimeoutSeconds: precheckTimeoutSeconds,
+				Keep: keep, Precheck: precheck, PrecheckTimeoutSeconds: precheckTimeoutSeconds,
+			}
+			// Unset stays 0 in the store, meaning "the default", so a job
+			// that never chose a max time follows the default if it changes.
+			if overlap != nil {
+				j.AllowOverlap = *overlap
+			}
+			if maxSecs != nil {
+				j.MaxTimeSeconds = *maxSecs
 			}
 			if err := a.st.CreateJob(context.Background(), j); err != nil {
 				return err
@@ -165,8 +236,7 @@ func newAddCmd() *cobra.Command {
 	cmd.Flags().StringVar(&permMode, "permission-mode", "", "permission mode: claude values are acceptEdits (default)/bypassPermissions/plan; "+
 		"codex values are a --sandbox policy, read-only/workspace-write (default)/danger-full-access; unused by opencode (kind=agent)")
 	cmd.Flags().StringVar(&timezone, "timezone", "local", `cron timezone: "local" or an IANA name`)
-	cmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 1, "max simultaneous runs of this job")
-	cmd.Flags().Int64Var(&timeoutSeconds, "timeout-seconds", 0, "hard kill after N seconds (0 = no timeout)")
+	overlapAndMaxTimeFlags(cmd, &allowOverlap, &maxTime, &maxConcurrent, &timeoutSeconds)
 	cmd.Flags().IntVar(&keep, "keep", 200, "how many past runs to retain")
 	cmd.Flags().StringVar(&precheck, "precheck", "", "shell gate run before execution: exit 0 runs the job (stdout becomes PENDING ITEMS context for agent prompts), exit 1 marks the run skipped, exit >=2 fails it (agent jobs mainly)")
 	cmd.Flags().Int64Var(&precheckTimeoutSeconds, "precheck-timeout-seconds", 0, "hard kill the precheck after N seconds (0 = no timeout)")
@@ -262,7 +332,8 @@ func newShowCmd() *cobra.Command {
 				fmt.Fprintf(out, "precheck:        %s\n", j.Precheck)
 				fmt.Fprintf(out, "precheck-timeout: %ds\n", j.PrecheckTimeoutSeconds)
 			}
-			fmt.Fprintf(out, "max-concurrent:  %d\n", j.MaxConcurrent)
+			fmt.Fprintf(out, "allow-overlap:   %v\n", j.AllowOverlap)
+			fmt.Fprintf(out, "max-time:        %s\n", maxTimeLabel(j))
 			fmt.Fprintf(out, "keep:            %d\n", j.Keep)
 			fmt.Fprintln(out, "recent runs:")
 			for _, r := range runs {
@@ -363,6 +434,8 @@ func newEditCmd() *cobra.Command {
 	var cronExpr, cwd, command, prompt, model, provider, permMode, timezone, precheck string
 	var maxConcurrent, keep int
 	var timeoutSeconds, precheckTimeoutSeconds int64
+	var allowOverlap bool
+	var maxTime time.Duration
 	cmd := &cobra.Command{
 		Use:   "edit <id>",
 		Short: "Change one or more fields of an existing job",
@@ -372,6 +445,10 @@ func newEditCmd() *cobra.Command {
 				if err := cronx.Validate(cronExpr); err != nil {
 					return fmt.Errorf("invalid --cron: %w", err)
 				}
+			}
+			overlap, maxSecs, err := resolveOverlapAndMaxTime(cmd, allowOverlap, maxTime, maxConcurrent, timeoutSeconds)
+			if err != nil {
+				return err
 			}
 			if cmd.Flags().Changed("cwd") {
 				resolved, err := resolveCwd(cwd)
@@ -405,12 +482,8 @@ func newEditCmd() *cobra.Command {
 			setStr(&p.Model, cmd, "model", model)
 			setStr(&p.Provider, cmd, "provider", provider)
 			setStr(&p.PermissionMode, cmd, "permission-mode", permMode)
-			if cmd.Flags().Changed("max-concurrent") {
-				p.MaxConcurrent = &maxConcurrent
-			}
-			if cmd.Flags().Changed("timeout-seconds") {
-				p.TimeoutSeconds = &timeoutSeconds
-			}
+			p.AllowOverlap = overlap
+			p.MaxTimeSeconds = maxSecs
 			if cmd.Flags().Changed("keep") {
 				p.Keep = &keep
 			}
@@ -429,8 +502,7 @@ func newEditCmd() *cobra.Command {
 	cmd.Flags().StringVar(&provider, "provider", "", `agent CLI: "claude", "opencode", or "codex" (kind=agent)`)
 	cmd.Flags().StringVar(&permMode, "permission-mode", "", "permission mode (kind=agent; meaning is provider-specific, see `add --help`)")
 	cmd.Flags().StringVar(&timezone, "timezone", "", `cron timezone`)
-	cmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 0, "max simultaneous runs")
-	cmd.Flags().Int64Var(&timeoutSeconds, "timeout-seconds", 0, "hard kill after N seconds")
+	overlapAndMaxTimeFlags(cmd, &allowOverlap, &maxTime, &maxConcurrent, &timeoutSeconds)
 	cmd.Flags().IntVar(&keep, "keep", 0, "how many past runs to retain")
 	cmd.Flags().StringVar(&precheck, "precheck", "", "shell gate run before execution (empty string clears it)")
 	cmd.Flags().Int64Var(&precheckTimeoutSeconds, "precheck-timeout-seconds", 0, "hard kill the precheck after N seconds")

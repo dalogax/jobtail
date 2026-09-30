@@ -59,14 +59,14 @@ CREATE INDEX IF NOT EXISTS idx_runs_job ON runs(job_id, started_at DESC);
 // actual execution instead, so it never conflates scheduling delay with
 // real run time.
 func additiveMigrations(db *sql.DB) error {
-	if err := addColumnIfMissing(db, "runs", "duration_ms", "INTEGER"); err != nil {
+	if _, err := addColumnIfMissing(db, "runs", "duration_ms", "INTEGER"); err != nil {
 		return err
 	}
 	// provider distinguishes which agent CLI an agent-kind job runs under
 	// ("claude" | "opencode" | "codex"); empty/NULL means "claude", the
 	// original and still-default behavior, so existing jobs from before
 	// multi-provider support need no backfill.
-	if err := addColumnIfMissing(db, "jobs", "provider", "TEXT"); err != nil {
+	if _, err := addColumnIfMissing(db, "jobs", "provider", "TEXT"); err != nil {
 		return err
 	}
 	// precheck is an optional shell gate run before a job's real execution
@@ -74,21 +74,54 @@ func additiveMigrations(db *sql.DB) error {
 	// to the agent prompt as pending-item context), exit 1 marks the run
 	// "skipped" without executing the job, exit >=2 marks it "failed".
 	// empty/NULL means "no precheck", so existing jobs keep their behavior.
-	if err := addColumnIfMissing(db, "jobs", "precheck", "TEXT"); err != nil {
+	if _, err := addColumnIfMissing(db, "jobs", "precheck", "TEXT"); err != nil {
 		return err
 	}
 	// precheck_timeout_seconds bounds the gate itself; empty/NULL means
-	// "no timeout", mirroring timeout_seconds.
-	if err := addColumnIfMissing(db, "jobs", "precheck_timeout_seconds", "INTEGER"); err != nil {
+	// "no timeout".
+	if _, err := addColumnIfMissing(db, "jobs", "precheck_timeout_seconds", "INTEGER"); err != nil {
 		return err
+	}
+	// allow_overlap replaces max_concurrent as the overlap policy: 0 (the
+	// default) means a job never starts while one of its runs is still
+	// active, 1 means it always does. max_concurrent stays in the table so
+	// older binaries can still open the database, but nothing reads it any
+	// more — a job that had raised it above 1 was asking for overlap, so
+	// that intent is carried over once, when the column first appears.
+	added, err := addColumnIfMissing(db, "jobs", "allow_overlap", "INTEGER NOT NULL DEFAULT 0")
+	if err != nil {
+		return err
+	}
+	if added {
+		if _, err := db.Exec(`UPDATE jobs SET allow_overlap = 1 WHERE max_concurrent > 1`); err != nil {
+			return err
+		}
+	}
+	// runner_pid, child_pid and exec_started_at are what lets a run that
+	// never finishes be told apart from one that is merely slow (see
+	// ActiveRuns). runner_pid is the jobtail process executing the run
+	// (run-exec, `jobtail run`, or the dashboard); child_pid is the job's
+	// own process, which leads its own process group so it can be killed
+	// along with everything it spawned; exec_started_at is when execution
+	// actually began, as opposed to started_at's nominal cron slot.
+	for _, c := range [][2]string{
+		{"runner_pid", "INTEGER"},
+		{"child_pid", "INTEGER"},
+		{"exec_started_at", "TEXT"},
+	} {
+		if _, err := addColumnIfMissing(db, "runs", c[0], c[1]); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func addColumnIfMissing(db *sql.DB, table, column, sqlType string) error {
+// addColumnIfMissing reports whether it actually added the column, so a
+// migration can backfill exactly once.
+func addColumnIfMissing(db *sql.DB, table, column, sqlType string) (bool, error) {
 	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
-		return err
+		return false, err
 	}
 	has := false
 	for rows.Next() {
@@ -98,23 +131,24 @@ func addColumnIfMissing(db *sql.DB, table, column, sqlType string) error {
 		var dflt sql.NullString
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
 			rows.Close()
-			return err
+			return false, err
 		}
 		if name == column {
 			has = true
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return false, err
 	}
 	rows.Close()
 
-	if !has {
-		if _, err := db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + sqlType); err != nil {
-			return err
-		}
+	if has {
+		return false, nil
 	}
-	return nil
+	if _, err := db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + sqlType); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 type Job struct {
@@ -132,8 +166,14 @@ type Job struct {
 	// kind="cli" jobs.
 	Provider       string
 	PermissionMode string
-	MaxConcurrent  int
-	TimeoutSeconds int64 // 0 = no timeout
+	// AllowOverlap lets a new run start while an earlier run of the same
+	// job is still active. false (the default) records the new run as
+	// skipped_overlap instead.
+	AllowOverlap bool
+	// MaxTimeSeconds is how long a run may take before jobtail kills it
+	// and records it as "timeout". 0 means DefaultMaxTime — there is no
+	// "unlimited": a run that never ends would block the job forever.
+	MaxTimeSeconds int64
 	Keep           int
 	// Precheck is an optional shell gate (run like Command, via sh -c in
 	// Cwd) evaluated before the job's real execution. "" = no precheck.
@@ -142,6 +182,17 @@ type Job struct {
 	PrecheckTimeoutSeconds int64
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
+}
+
+// DefaultMaxTime applies to every job that doesn't set MaxTimeSeconds.
+const DefaultMaxTime = 30 * time.Minute
+
+// MaxTime is the job's effective run time limit.
+func (j Job) MaxTime() time.Duration {
+	if j.MaxTimeSeconds <= 0 {
+		return DefaultMaxTime
+	}
+	return time.Duration(j.MaxTimeSeconds) * time.Second
 }
 
 type Run struct {
@@ -210,13 +261,13 @@ func (s *Store) CreateJob(ctx context.Context, j Job) error {
 	now := timeToStr(time.Now())
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO jobs (id, kind, cron, timezone, enabled, cwd, command, prompt, model, provider,
-			permission_mode, max_concurrent, timeout_seconds, keep, precheck, precheck_timeout_seconds,
+			permission_mode, allow_overlap, timeout_seconds, keep, precheck, precheck_timeout_seconds,
 			created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		j.ID, j.Kind, j.Cron, j.Timezone, boolToInt(j.Enabled), j.Cwd,
 		nullableStr(j.Command), nullableStr(j.Prompt), nullableStr(j.Model), nullableStr(j.Provider),
 		nullableStr(j.PermissionMode),
-		j.MaxConcurrent, nullableInt(j.TimeoutSeconds), j.Keep,
+		boolToInt(j.AllowOverlap), nullableInt(j.MaxTimeSeconds), j.Keep,
 		nullableStr(j.Precheck), nullableInt(j.PrecheckTimeoutSeconds), now, now)
 	return err
 }
@@ -224,7 +275,7 @@ func (s *Store) CreateJob(ctx context.Context, j Job) error {
 func (s *Store) GetJob(ctx context.Context, id string) (Job, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, kind, cron, timezone, enabled, cwd, command, prompt, model, provider,
-		       permission_mode, max_concurrent, timeout_seconds, keep,
+		       permission_mode, allow_overlap, timeout_seconds, keep,
 		       precheck, precheck_timeout_seconds, created_at, updated_at
 		FROM jobs WHERE id = ?`, id)
 	return scanJob(row)
@@ -232,12 +283,12 @@ func (s *Store) GetJob(ctx context.Context, id string) (Job, error) {
 
 func scanJob(row *sql.Row) (Job, error) {
 	var j Job
-	var enabled int
+	var enabled, allowOverlap int
 	var command, prompt, model, provider, permMode, precheck sql.NullString
 	var timeoutSeconds, precheckTimeout sql.NullInt64
 	var createdAt, updatedAt string
 	err := row.Scan(&j.ID, &j.Kind, &j.Cron, &j.Timezone, &enabled, &j.Cwd, &command, &prompt, &model, &provider,
-		&permMode, &j.MaxConcurrent, &timeoutSeconds, &j.Keep,
+		&permMode, &allowOverlap, &timeoutSeconds, &j.Keep,
 		&precheck, &precheckTimeout, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Job{}, ErrNotFound
@@ -251,7 +302,8 @@ func scanJob(row *sql.Row) (Job, error) {
 	j.Model = model.String
 	j.Provider = provider.String
 	j.PermissionMode = permMode.String
-	j.TimeoutSeconds = timeoutSeconds.Int64
+	j.AllowOverlap = allowOverlap != 0
+	j.MaxTimeSeconds = timeoutSeconds.Int64
 	j.Precheck = precheck.String
 	j.PrecheckTimeoutSeconds = precheckTimeout.Int64
 	j.CreatedAt, err = strToTime(createdAt)
@@ -277,7 +329,7 @@ func scanJob(row *sql.Row) (Job, error) {
 func (s *Store) ListJobs(ctx context.Context) ([]JobSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT j.id, j.kind, j.cron, j.timezone, j.enabled, j.cwd, j.command, j.prompt, j.model, j.provider,
-		       j.permission_mode, j.max_concurrent, j.timeout_seconds, j.keep, j.precheck, j.precheck_timeout_seconds,
+		       j.permission_mode, j.allow_overlap, j.timeout_seconds, j.keep, j.precheck, j.precheck_timeout_seconds,
 		       j.created_at, j.updated_at,
 		       (SELECT COUNT(*) FROM runs r WHERE r.job_id = j.id) AS run_count,
 		       (SELECT r2.status FROM runs r2 WHERE r2.job_id = j.id ORDER BY r2.started_at DESC LIMIT 1) AS last_status,
@@ -291,12 +343,12 @@ func (s *Store) ListJobs(ctx context.Context) ([]JobSummary, error) {
 	var out []JobSummary
 	for rows.Next() {
 		var js JobSummary
-		var enabled int
+		var enabled, allowOverlap int
 		var command, prompt, model, provider, permMode, precheck, lastStatus, lastRunAt sql.NullString
 		var timeoutSeconds, precheckTimeout sql.NullInt64
 		var createdAt, updatedAt string
 		if err := rows.Scan(&js.ID, &js.Kind, &js.Cron, &js.Timezone, &enabled, &js.Cwd, &command, &prompt, &model, &provider,
-			&permMode, &js.MaxConcurrent, &timeoutSeconds, &js.Keep, &precheck, &precheckTimeout,
+			&permMode, &allowOverlap, &timeoutSeconds, &js.Keep, &precheck, &precheckTimeout,
 			&createdAt, &updatedAt,
 			&js.RunCount, &lastStatus, &lastRunAt); err != nil {
 			return nil, err
@@ -307,7 +359,8 @@ func (s *Store) ListJobs(ctx context.Context) ([]JobSummary, error) {
 		js.Model = model.String
 		js.Provider = provider.String
 		js.PermissionMode = permMode.String
-		js.TimeoutSeconds = timeoutSeconds.Int64
+		js.AllowOverlap = allowOverlap != 0
+		js.MaxTimeSeconds = timeoutSeconds.Int64
 		js.Precheck = precheck.String
 		js.PrecheckTimeoutSeconds = precheckTimeout.Int64
 		js.LastStatus = lastStatus.String
@@ -383,8 +436,8 @@ type JobPatch struct {
 	Model                  *string
 	Provider               *string
 	PermissionMode         *string
-	MaxConcurrent          *int
-	TimeoutSeconds         *int64
+	AllowOverlap           *bool
+	MaxTimeSeconds         *int64
 	Keep                   *int
 	Precheck               *string
 	PrecheckTimeoutSeconds *int64
@@ -419,11 +472,11 @@ func (s *Store) EditJob(ctx context.Context, id string, p JobPatch) error {
 	if p.PermissionMode != nil {
 		j.PermissionMode = *p.PermissionMode
 	}
-	if p.MaxConcurrent != nil {
-		j.MaxConcurrent = *p.MaxConcurrent
+	if p.AllowOverlap != nil {
+		j.AllowOverlap = *p.AllowOverlap
 	}
-	if p.TimeoutSeconds != nil {
-		j.TimeoutSeconds = *p.TimeoutSeconds
+	if p.MaxTimeSeconds != nil {
+		j.MaxTimeSeconds = *p.MaxTimeSeconds
 	}
 	if p.Keep != nil {
 		j.Keep = *p.Keep
@@ -436,25 +489,18 @@ func (s *Store) EditJob(ctx context.Context, id string, p JobPatch) error {
 	}
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE jobs SET cron=?, timezone=?, cwd=?, command=?, prompt=?, model=?, provider=?, permission_mode=?,
-			max_concurrent=?, timeout_seconds=?, keep=?, precheck=?, precheck_timeout_seconds=?, updated_at=?
+			allow_overlap=?, timeout_seconds=?, keep=?, precheck=?, precheck_timeout_seconds=?, updated_at=?
 		WHERE id=?`,
 		j.Cron, j.Timezone, j.Cwd, nullableStr(j.Command), nullableStr(j.Prompt), nullableStr(j.Model),
-		nullableStr(j.Provider), nullableStr(j.PermissionMode), j.MaxConcurrent, nullableInt(j.TimeoutSeconds), j.Keep,
+		nullableStr(j.Provider), nullableStr(j.PermissionMode), boolToInt(j.AllowOverlap), nullableInt(j.MaxTimeSeconds), j.Keep,
 		nullableStr(j.Precheck), nullableInt(j.PrecheckTimeoutSeconds),
 		timeToStr(time.Now()), id)
 	return err
 }
 
-// activeRunCount returns how many runs for jobID are still status='running'.
-func (s *Store) activeRunCount(ctx context.Context, jobID string) (int, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE job_id = ? AND status = 'running'`, jobID).Scan(&n)
-	return n, err
-}
-
-// StartRun creates a new run row with status='running'. If the job's
-// max_concurrent is already met by in-flight runs, it instead records a
-// status='skipped_overlap' row and returns ErrOverlap.
+// StartRun creates a new run row with status='running'. If the job does
+// not allow overlap and another of its runs is still active, it instead
+// records a status='skipped_overlap' row and returns ErrOverlap.
 func (s *Store) StartRun(ctx context.Context, jobID, runID, trigger, logPath string, startedAt time.Time) (Run, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -473,7 +519,7 @@ func (s *Store) StartRun(ctx context.Context, jobID, runID, trigger, logPath str
 	}
 
 	r := Run{ID: runID, JobID: jobID, Trigger: trigger, StartedAt: startedAt, LogPath: logPath}
-	overlap := active >= j.MaxConcurrent
+	overlap := !j.AllowOverlap && active > 0
 	if overlap {
 		r.Status = "skipped_overlap"
 	} else {
@@ -496,7 +542,7 @@ func (s *Store) StartRun(ctx context.Context, jobID, runID, trigger, logPath str
 func (s *Store) getJobTx(ctx context.Context, tx *sql.Tx, id string) (Job, error) {
 	row := tx.QueryRowContext(ctx, `
 		SELECT id, kind, cron, timezone, enabled, cwd, command, prompt, model, provider,
-		       permission_mode, max_concurrent, timeout_seconds, keep,
+		       permission_mode, allow_overlap, timeout_seconds, keep,
 		       precheck, precheck_timeout_seconds, created_at, updated_at
 		FROM jobs WHERE id = ?`, id)
 	return scanJob(row)
@@ -507,14 +553,90 @@ func (s *Store) SetRunSessionID(ctx context.Context, runID, sessionID string) er
 	return err
 }
 
+// FinishRun records a run's outcome. Only a run that is still "running"
+// is updated: once the reaper (runner.ReapStale) has finalized a run, the
+// process that was executing it may still get round to reporting — having
+// just been killed by that same reaper, say — and must not overwrite the
+// verdict with a less accurate one. That case returns nil, not an error.
 func (s *Store) FinishRun(ctx context.Context, runID, status string, exitCode int, finishedAt time.Time, durationMs int64) error {
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE runs SET status = ?, exit_code = ?, finished_at = ?, duration_ms = ? WHERE id = ?`,
+		UPDATE runs SET status = ?, exit_code = ?, finished_at = ?, duration_ms = ?
+		WHERE id = ? AND status = 'running'`,
 		status, exitCode, timeToStr(finishedAt), durationMs, runID)
 	if err != nil {
 		return err
 	}
-	return checkRowsAffected(res)
+	if err := checkRowsAffected(res); !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	_, err = s.GetRun(ctx, runID)
+	return err // nil if the run exists and was already finished
+}
+
+// MarkRunExecuting records which process is executing a run and when it
+// actually began. It is what lets ActiveRuns' callers tell a run whose
+// executor died apart from one that is still working.
+func (s *Store) MarkRunExecuting(ctx context.Context, runID string, runnerPID int, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE runs SET runner_pid = ?, exec_started_at = ? WHERE id = ?`,
+		runnerPID, timeToStr(at), runID)
+	return err
+}
+
+// SetRunChildPID records the pid of the process the run is currently
+// waiting on — the precheck gate, then the job itself. That process leads
+// its own process group, so the pid doubles as the group to kill.
+func (s *Store) SetRunChildPID(ctx context.Context, runID string, pid int) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE runs SET child_pid = ? WHERE id = ?`, pid, runID)
+	return err
+}
+
+// ActiveRun is a status='running' run with what is needed to decide
+// whether it is still genuinely running.
+type ActiveRun struct {
+	Run
+	RunnerPID     sql.NullInt64
+	ChildPID      sql.NullInt64
+	ExecStartedAt sql.NullTime
+	// MaxTime is the owning job's effective limit.
+	MaxTime time.Duration
+}
+
+// ActiveRuns returns every run still marked "running", across all jobs.
+func (s *Store) ActiveRuns(ctx context.Context) ([]ActiveRun, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT r.id, r.job_id, r.trigger, r.started_at, r.log_path,
+		       r.runner_pid, r.child_pid, r.exec_started_at, j.timeout_seconds
+		FROM runs r JOIN jobs j ON j.id = r.job_id
+		WHERE r.status = 'running'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ActiveRun
+	for rows.Next() {
+		var a ActiveRun
+		var startedAt string
+		var execStartedAt sql.NullString
+		var maxTimeSeconds sql.NullInt64
+		if err := rows.Scan(&a.ID, &a.JobID, &a.Trigger, &startedAt, &a.LogPath,
+			&a.RunnerPID, &a.ChildPID, &execStartedAt, &maxTimeSeconds); err != nil {
+			return nil, err
+		}
+		a.Status = "running"
+		if a.StartedAt, err = strToTime(startedAt); err != nil {
+			return nil, err
+		}
+		if execStartedAt.Valid {
+			t, err := strToTime(execStartedAt.String)
+			if err != nil {
+				return nil, err
+			}
+			a.ExecStartedAt = sql.NullTime{Time: t, Valid: true}
+		}
+		a.MaxTime = Job{MaxTimeSeconds: maxTimeSeconds.Int64}.MaxTime()
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) GetRun(ctx context.Context, id string) (Run, error) {
@@ -622,7 +744,7 @@ func placeholders(n int) string {
 func (s *Store) EnabledJobs(ctx context.Context) ([]Job, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, kind, cron, timezone, enabled, cwd, command, prompt, model, provider,
-		       permission_mode, max_concurrent, timeout_seconds, keep,
+		       permission_mode, allow_overlap, timeout_seconds, keep,
 		       precheck, precheck_timeout_seconds, created_at, updated_at
 		FROM jobs WHERE enabled = 1 ORDER BY id`)
 	if err != nil {
@@ -632,12 +754,12 @@ func (s *Store) EnabledJobs(ctx context.Context) ([]Job, error) {
 	var out []Job
 	for rows.Next() {
 		var j Job
-		var enabled int
+		var enabled, allowOverlap int
 		var command, prompt, model, provider, permMode, precheck sql.NullString
 		var timeoutSeconds, precheckTimeout sql.NullInt64
 		var createdAt, updatedAt string
 		if err := rows.Scan(&j.ID, &j.Kind, &j.Cron, &j.Timezone, &enabled, &j.Cwd, &command, &prompt, &model, &provider,
-			&permMode, &j.MaxConcurrent, &timeoutSeconds, &j.Keep,
+			&permMode, &allowOverlap, &timeoutSeconds, &j.Keep,
 			&precheck, &precheckTimeout, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
@@ -647,7 +769,8 @@ func (s *Store) EnabledJobs(ctx context.Context) ([]Job, error) {
 		j.Model = model.String
 		j.Provider = provider.String
 		j.PermissionMode = permMode.String
-		j.TimeoutSeconds = timeoutSeconds.Int64
+		j.AllowOverlap = allowOverlap != 0
+		j.MaxTimeSeconds = timeoutSeconds.Int64
 		j.Precheck = precheck.String
 		j.PrecheckTimeoutSeconds = precheckTimeout.Int64
 		if j.CreatedAt, err = strToTime(createdAt); err != nil {

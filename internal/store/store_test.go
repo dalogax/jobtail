@@ -110,3 +110,72 @@ func TestMigrationAddsDurationMsToExistingDB(t *testing.T) {
 		t.Fatalf("want duration_ms=1234, got %+v", got.DurationMs)
 	}
 }
+
+// Opening a database from before allow_overlap existed must carry over a
+// job's max_concurrent: above 1 it was asking for overlap.
+func TestMigrationCarriesMaxConcurrentIntoAllowOverlap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`
+		CREATE TABLE jobs (
+		  id TEXT PRIMARY KEY, kind TEXT NOT NULL, cron TEXT NOT NULL,
+		  timezone TEXT NOT NULL DEFAULT 'local', enabled INTEGER NOT NULL DEFAULT 1,
+		  cwd TEXT NOT NULL, command TEXT, prompt TEXT, model TEXT, permission_mode TEXT,
+		  max_concurrent INTEGER NOT NULL DEFAULT 1, timeout_seconds INTEGER,
+		  keep INTEGER NOT NULL DEFAULT 200, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+		);`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := raw.Exec(`INSERT INTO jobs (id, kind, cron, cwd, max_concurrent, timeout_seconds, created_at, updated_at) VALUES
+		('single', 'cli', '0 0 * * *', '/tmp', 1, NULL, ?, ?),
+		('multi',  'cli', '0 0 * * *', '/tmp', 3, 600,  ?, ?)`, now, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	single, _ := st.GetJob(ctx, "single")
+	multi, _ := st.GetJob(ctx, "multi")
+	if single.AllowOverlap || !multi.AllowOverlap {
+		t.Fatalf("allow_overlap: single=%v multi=%v, want false/true", single.AllowOverlap, multi.AllowOverlap)
+	}
+	if single.MaxTime() != DefaultMaxTime || multi.MaxTime() != 10*time.Minute {
+		t.Fatalf("max time: single=%s multi=%s, want %s/10m", single.MaxTime(), multi.MaxTime(), DefaultMaxTime)
+	}
+}
+
+func TestAllowOverlapLetsRunsStack(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	for _, j := range []Job{
+		{ID: "strict", Kind: "cli", Cron: "0 0 * * *", Timezone: "local", Cwd: "/tmp", Command: "true", Keep: 200},
+		{ID: "loose", Kind: "cli", Cron: "0 0 * * *", Timezone: "local", Cwd: "/tmp", Command: "true", Keep: 200, AllowOverlap: true},
+	} {
+		if err := st.CreateJob(ctx, j); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.StartRun(ctx, j.ID, j.ID+"-1", "manual", "/dev/null", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		_, err := st.StartRun(ctx, j.ID, j.ID+"-2", "manual", "/dev/null", time.Now())
+		if j.AllowOverlap && err != nil {
+			t.Fatalf("%s: overlap allowed but second run refused: %v", j.ID, err)
+		}
+		if !j.AllowOverlap && err != ErrOverlap {
+			t.Fatalf("%s: want ErrOverlap, got %v", j.ID, err)
+		}
+	}
+}
