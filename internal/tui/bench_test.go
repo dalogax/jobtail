@@ -91,7 +91,7 @@ func benchModel(tb testing.TB, w, h, runs, logKB int) model {
 		j := store.Job{
 			ID: fmt.Sprintf("job-%02d", i), Kind: "cli", Cron: "*/5 * * * *",
 			Timezone: "local", Enabled: true, Cwd: dir, Command: "echo hi",
-			Keep: 200,
+			MaxConcurrent: 1, Keep: 200,
 		}
 		if i == 0 {
 			j.Kind, j.Command, j.Prompt = "agent", "", "audit dependencies"

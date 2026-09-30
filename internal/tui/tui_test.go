@@ -47,7 +47,7 @@ func seedStore(t testing.TB) (*store.Store, string) {
 	ctx := context.Background()
 	if err := st.CreateJob(ctx, store.Job{
 		ID: "greet", Kind: "cli", Cron: "0 0 * * *", Timezone: "local",
-		Enabled: true, Cwd: dir, Command: "echo hi", Keep: 200,
+		Enabled: true, Cwd: dir, Command: "echo hi", MaxConcurrent: 1, Keep: 200,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestLongLogLineIsWrappedNotCropped(t *testing.T) {
 	ctx := context.Background()
 	if err := st.CreateJob(ctx, store.Job{
 		ID: "longlog", Kind: "agent", Cron: "0 0 * * *", Timezone: "local",
-		Enabled: true, Cwd: t.TempDir(), Keep: 200,
+		Enabled: true, Cwd: t.TempDir(), MaxConcurrent: 1, Keep: 200,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +286,7 @@ func addSecondJob(t *testing.T, st *store.Store) {
 	t.Helper()
 	if err := st.CreateJob(context.Background(), store.Job{
 		ID: "abbey", Kind: "cli", Cron: "0 0 * * *", Timezone: "local",
-		Enabled: true, Cwd: t.TempDir(), Command: "true", Keep: 200,
+		Enabled: true, Cwd: t.TempDir(), Command: "true", MaxConcurrent: 1, Keep: 200,
 	}); err != nil {
 		t.Fatal(err)
 	}

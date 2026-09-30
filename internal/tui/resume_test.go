@@ -29,7 +29,7 @@ func seedAgentRun(t *testing.T, sessionID string) model {
 	dir := t.TempDir()
 	if err := st.CreateJob(ctx, store.Job{
 		ID: "agentjob", Kind: "agent", Cron: "0 0 * * *", Timezone: "local",
-		Enabled: true, Cwd: dir, Prompt: "do a thing", Keep: 200,
+		Enabled: true, Cwd: dir, Prompt: "do a thing", MaxConcurrent: 1, Keep: 200,
 	}); err != nil {
 		t.Fatal(err)
 	}

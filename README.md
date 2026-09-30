@@ -37,7 +37,7 @@ jobtail add backups --kind cli --cron "*/15 * * * *" \
 
 # a headless agent turn
 jobtail add deps-review --kind agent --cron "0 3 * * *" \
-  --cwd ~/code/shop --max-time 45m \
+  --cwd ~/code/shop --timeout-seconds 1800 \
   --prompt "Check for outdated deps. Open a PR if it's safe to update."
 ```
 
@@ -47,17 +47,9 @@ Then `jobtail` opens the dashboard.
 
 ## Runs that don't finish
 
-Every run has a **max time** — 30 minutes unless the job sets `--max-time` (`90s`, `45m`, `2h`). Past it, jobtail kills the run's whole process group — the command *and* anything it spawned — and records it as `timeout`. There's no unlimited: a run that never ends would block its job forever.
+Every run has a timeout: 30 minutes unless the job sets `--timeout-seconds`. Past it, jobtail kills the run's whole process group — the command *and* anything it spawned — and records it as `timeout`.
 
-By default a job **doesn't overlap itself**: if its previous run is still going when it's due again, the new one is recorded as `skipped_overlap` and doesn't start. Pass `--allow-overlap` for jobs where runs are independent and may stack.
-
-If the process executing a run dies outright — killed, crashed, lost to a reboot — the run can't record its own end. The next tick (or the next `jobtail run`) notices, kills whatever it left behind, and marks it `failed` (or `timeout`, if it was also past its max time), so a dead run never blocks the job for more than a minute.
-
-```sh
-jobtail edit deps-review --max-time 2h        # give a slow job more room
-jobtail edit metrics-push --allow-overlap     # runs may stack
-jobtail edit metrics-push --allow-overlap=false
-```
+A job doesn't overlap itself by default (`--max-concurrent 1`): if its previous run is still going when it's due again, the new one is recorded as `skipped_overlap`. So a run that can't end on its own must not be allowed to look like it's still going. If the process executing a run dies outright — killed, crashed, lost to a reboot — the next tick (or the next `jobtail run`) notices, kills whatever it left behind, and marks the run `failed` (or `timeout`, if it was also past its limit). A dead run never blocks its job for more than a minute.
 
 ## Reading a run
 

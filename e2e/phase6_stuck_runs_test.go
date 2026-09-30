@@ -1,76 +1,32 @@
-// Overlap policy and max time: a job that never finishes must not be able
-// to block the job forever, whether it hangs or the process executing it
-// dies.
+// Timeouts and stuck runs: a run that never finishes must not be able to
+// block its job forever, whether it hangs or the process executing it dies.
 package e2e
 
 import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
 )
 
-func TestShowReportsOverlapAndMaxTimeDefaults(t *testing.T) {
+func TestShowReportsTheDefaultTimeout(t *testing.T) {
 	e := newEnv(t)
 	e.run("add", "plain", "--kind", "cli", "--cron", "0 0 * * *", "--cwd", t.TempDir(), "--cmd", "true")
-	out := e.run("show", "plain")
-	if !strings.Contains(out, "allow-overlap:   false") || !strings.Contains(out, "max-time:        30m0s (default)") {
-		t.Fatalf("show should report the defaults, got:\n%s", out)
+	if out := e.run("show", "plain"); !strings.Contains(out, "timeout:         30m0s (default)") {
+		t.Fatalf("show should report the default timeout, got:\n%s", out)
 	}
-
-	e.run("edit", "plain", "--allow-overlap", "--max-time", "2h")
-	out = e.run("show", "plain")
-	if !strings.Contains(out, "allow-overlap:   true") || !strings.Contains(out, "max-time:        2h0m0s\n") {
+	e.run("edit", "plain", "--timeout-seconds", "7200")
+	if out := e.run("show", "plain"); !strings.Contains(out, "timeout:         2h0m0s\n") {
 		t.Fatalf("show should reflect the edit, got:\n%s", out)
 	}
-
-	if _, err := e.runAllowFail("edit", "plain", "--max-time", "0s"); err == nil {
-		t.Fatal("--max-time 0s should be refused: runs can't be unbounded")
-	}
 }
 
-// The flags this replaces keep working, translated.
-func TestDeprecatedFlagsStillWork(t *testing.T) {
-	e := newEnv(t)
-	e.run("add", "old", "--kind", "cli", "--cron", "0 0 * * *", "--cwd", t.TempDir(), "--cmd", "true",
-		"--max-concurrent", "2", "--timeout-seconds", "90")
-	out := e.run("show", "old")
-	if !strings.Contains(out, "allow-overlap:   true") || !strings.Contains(out, "max-time:        1m30s") {
-		t.Fatalf("deprecated flags weren't translated, got:\n%s", out)
-	}
-}
-
-func TestAllowOverlapRunsConcurrently(t *testing.T) {
-	e := newEnv(t)
-	e.run("add", "stack", "--kind", "cli", "--cron", "0 0 * * *", "--cwd", t.TempDir(), "--cmd", "sleep 1",
-		"--allow-overlap")
-
-	cmd1, buf1 := e.start("run", "stack")
-	time.Sleep(300 * time.Millisecond)
-	cmd2, buf2 := e.start("run", "stack")
-	var wg sync.WaitGroup
-	var err1, err2 error
-	wg.Add(2)
-	go func() { defer wg.Done(); err1 = cmd1.Wait() }()
-	go func() { defer wg.Done(); err2 = cmd2.Wait() }()
-	wg.Wait()
-	if err1 != nil || err2 != nil {
-		t.Fatalf("both runs should succeed:\n%v\n%s\n%v\n%s", err1, buf1, err2, buf2)
-	}
-	for _, r := range mustUnmarshalRuns(t, e.run("runs", "stack", "--json")) {
-		if r.Status != "ok" {
-			t.Fatalf("want every run ok with --allow-overlap, got %+v", r)
-		}
-	}
-}
-
-func TestMaxTimeKillsARun(t *testing.T) {
+func TestTimeoutKillsARun(t *testing.T) {
 	e := newEnv(t)
 	e.run("add", "hang", "--kind", "cli", "--cron", "0 0 * * *", "--cwd", t.TempDir(), "--cmd", "sleep 30",
-		"--max-time", "1s")
+		"--timeout-seconds", "1")
 
 	start := time.Now()
 	out, err := e.runAllowFail("run", "hang")
@@ -78,9 +34,9 @@ func TestMaxTimeKillsARun(t *testing.T) {
 		t.Fatalf("a timed-out run should exit non-zero, got:\n%s", out)
 	}
 	if took := time.Since(start); took > 10*time.Second {
-		t.Fatalf("a 1s max time took %s to stop the run", took)
+		t.Fatalf("a 1s timeout took %s to stop the run", took)
 	}
-	if !strings.Contains(out, "exceeded its max time of 1s") {
+	if !strings.Contains(out, "exceeded its timeout of 1s") {
 		t.Fatalf("output should say why the run was killed, got:\n%s", out)
 	}
 	runs := mustUnmarshalRuns(t, e.run("runs", "hang", "--json"))

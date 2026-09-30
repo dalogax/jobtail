@@ -9,7 +9,7 @@ import (
 	"github.com/dalogax/jobtail/internal/store"
 )
 
-// ReapGrace is how far past its max time a run may still be marked
+// ReapGrace is how far past its timeout a run may still be marked
 // "running" before ReapStale steps in. The executing process enforces the
 // limit itself (Execute's deadline, then SIGTERM, then SIGKILL after a few
 // seconds); the reaper is only the backstop for when that process is gone
@@ -29,9 +29,9 @@ type Reaped struct {
 //
 //   - its executing process (run-exec, `jobtail run`, or the dashboard) is
 //     gone — killed, crashed, lost to a reboot — and so will never record
-//     an outcome. Marked "failed", or "timeout" if it is also past its max
-//     time.
-//   - it is more than ReapGrace past its max time, however alive its
+//     an outcome. Marked "failed", or "timeout" if it is also past its
+//     timeout.
+//   - it is more than ReapGrace past its timeout, however alive its
 //     executor claims to be. Marked "timeout". This also covers rows from
 //     before jobtail recorded executors at all, and runs whose run-exec
 //     never came up.
@@ -51,7 +51,7 @@ func ReapStale(ctx context.Context, st *store.Store, now time.Time) ([]Reaped, e
 		if a.ExecStartedAt.Valid {
 			began = a.ExecStartedAt.Time
 		}
-		overdue := now.After(began.Add(a.MaxTime + ReapGrace))
+		overdue := now.After(began.Add(a.Timeout + ReapGrace))
 		runnerGone := a.RunnerPID.Valid && !execengine.ProcessAlive(int(a.RunnerPID.Int64))
 		if !overdue && !runnerGone {
 			continue
@@ -59,13 +59,13 @@ func ReapStale(ctx context.Context, st *store.Store, now time.Time) ([]Reaped, e
 
 		r := Reaped{RunID: a.ID, JobID: a.JobID, Status: "timeout"}
 		switch {
-		case runnerGone && !now.After(began.Add(a.MaxTime)):
+		case runnerGone && !now.After(began.Add(a.Timeout)):
 			r.Status = "failed"
 			r.Reason = fmt.Sprintf("the jobtail process executing it (pid %d) exited without recording an outcome", a.RunnerPID.Int64)
 		case runnerGone:
-			r.Reason = fmt.Sprintf("it exceeded its max time of %s and the jobtail process executing it (pid %d) is gone", a.MaxTime, a.RunnerPID.Int64)
+			r.Reason = fmt.Sprintf("it exceeded its timeout of %s and the jobtail process executing it (pid %d) is gone", a.Timeout, a.RunnerPID.Int64)
 		default:
-			r.Reason = fmt.Sprintf("it was still marked running %s past its max time of %s", now.Sub(began.Add(a.MaxTime)).Round(time.Second), a.MaxTime)
+			r.Reason = fmt.Sprintf("it was still marked running %s past its timeout of %s", now.Sub(began.Add(a.Timeout)).Round(time.Second), a.Timeout)
 		}
 		if a.ChildPID.Valid && execengine.KillProcessGroup(int(a.ChildPID.Int64)) {
 			r.Reason += fmt.Sprintf("; killed its process group %d", a.ChildPID.Int64)

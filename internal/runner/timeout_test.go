@@ -15,10 +15,10 @@ import (
 	"github.com/dalogax/jobtail/internal/store"
 )
 
-func limitedJob(t *testing.T, id, command string, maxTimeSeconds int64) store.Job {
+func limitedJob(t *testing.T, id, command string, timeoutSeconds int64) store.Job {
 	return store.Job{
 		ID: id, Kind: "cli", Cron: "0 0 * * *", Timezone: "local", Enabled: true,
-		Cwd: t.TempDir(), Command: command, Keep: 200, MaxTimeSeconds: maxTimeSeconds,
+		Cwd: t.TempDir(), Command: command, MaxConcurrent: 1, Keep: 200, TimeoutSeconds: timeoutSeconds,
 	}
 }
 
@@ -33,7 +33,7 @@ func waitGone(pid int, within time.Duration) bool {
 	return false
 }
 
-// A run past its max time must be killed — and so must anything it
+// A run past its timeout must be killed — and so must anything it
 // spawned, not just the shell. The grandchild here is exactly what used to
 // survive: a background process holding on after its `sh -c` parent was
 // signalled.
@@ -55,7 +55,7 @@ func TestMaxTimeKillsTheWholeProcessGroup(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 	if took := time.Since(start); took > 8*time.Second {
-		t.Fatalf("a 1s max time let the run go on for %s", took)
+		t.Fatalf("a 1s timeout let the run go on for %s", took)
 	}
 	if res.Status != "timeout" {
 		t.Fatalf("want status timeout, got %+v", res)
@@ -66,15 +66,15 @@ func TestMaxTimeKillsTheWholeProcessGroup(t *testing.T) {
 		t.Fatalf("grandchild pid file: %q", data)
 	}
 	if !waitGone(gpid, 7*time.Second) {
-		t.Fatalf("grandchild %d outlived its run's max time", gpid)
+		t.Fatalf("grandchild %d outlived its run's timeout", gpid)
 	}
 	log, _ := os.ReadFile(logPath)
-	if !strings.Contains(string(log), "exceeded its max time of 1s") {
+	if !strings.Contains(string(log), "exceeded its timeout of 1s") {
 		t.Errorf("log should say why the run was killed, got: %s", log)
 	}
 }
 
-// The limit covers the precheck too: a gate that hangs is still the run
+// The timeout covers the precheck too: a gate that hangs is still the run
 // hanging, and is reported as the run's timeout rather than a gate failure.
 func TestMaxTimeCoversThePrecheck(t *testing.T) {
 	st := testStore(t)
@@ -87,8 +87,8 @@ func TestMaxTimeCoversThePrecheck(t *testing.T) {
 }
 
 func TestJobsDefaultToThirtyMinutes(t *testing.T) {
-	if got := (store.Job{}).MaxTime(); got != 30*time.Minute {
-		t.Fatalf("default max time = %s, want 30m", got)
+	if got := (store.Job{}).Timeout(); got != 30*time.Minute {
+		t.Fatalf("default timeout = %s, want 30m", got)
 	}
 }
 
@@ -180,7 +180,7 @@ func TestReapOverdueRuns(t *testing.T) {
 	}
 
 	if reaped, _ := ReapStale(ctx, st, began.Add(time.Minute+ReapGrace-time.Second)); len(reaped) != 0 {
-		t.Fatalf("reaped a run still within its max time + grace: %+v", reaped)
+		t.Fatalf("reaped a run still within its timeout + grace: %+v", reaped)
 	}
 	if got := runStatus(t, st, "r1"); got != "running" {
 		t.Fatalf("status = %s, want running", got)

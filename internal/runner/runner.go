@@ -26,7 +26,7 @@ import (
 // "failed". Either early outcome is written to the run's log so the
 // dashboard always shows what the gate decided and why.
 //
-// The whole run, gate included, is bounded by the job's max time: past it
+// The whole run, gate included, is bounded by the job's timeout: past it
 // the job's process group is killed and the run is recorded as "timeout".
 // The executing process and the job's pid are written to the run row as
 // they become known, so ReapStale can still end the run from another
@@ -43,7 +43,7 @@ func Execute(ctx context.Context, st *store.Store, j store.Job, runID, logPath s
 
 	start := time.Now()
 	_ = st.MarkRunExecuting(ctx, runID, os.Getpid(), start)
-	ctx, cancel := context.WithTimeout(ctx, j.MaxTime())
+	ctx, cancel := context.WithTimeout(ctx, j.Timeout())
 	defer cancel()
 	ctx = execengine.WithStartHook(ctx, func(pid int) {
 		// Deliberately not ctx: recording the pid must not fail just
@@ -58,7 +58,7 @@ func Execute(ctx context.Context, st *store.Store, j store.Job, runID, logPath s
 		// was the run's.
 		res.Status = "timeout"
 		res.Duration = time.Since(start)
-		appendLog(logPath, fmt.Sprintf("\n[jobtail] killed: run exceeded its max time of %s\n", j.MaxTime()))
+		appendLog(logPath, fmt.Sprintf("\n[jobtail] killed: run exceeded its timeout of %s\n", j.Timeout()))
 		return res, nil
 	}
 	return res, err
