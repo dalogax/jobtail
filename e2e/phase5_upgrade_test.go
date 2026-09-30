@@ -45,9 +45,18 @@ func fakeRelease(t *testing.T, latestTag, assetBody string) (baseURL string, hit
 	mux.HandleFunc("/"+assetName, func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, assetBody)
 	})
+	// The redirect-based lookup hits /releases/latest on the same fake
+	// server first; it must fail (404) so tests exercise the API endpoint
+	// they explicitly stub with releases/latest JSON.
+	mux.HandleFunc("/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
 	return srv.URL, hits
 }
 
+// runWithUpdateAPI runs the binary with the fake GitHub Releases server
+// set for both the redirect-based lookup (JOBTAIL_UPDATE_BASE) and the API
+// fallback (JOBTAIL_UPDATE_API).
 func (e *env) runWithUpdateAPI(apiBase, versionOverride string, args ...string) (string, error) {
 	e.t.Helper()
 	cmd := exec.Command(e.bin, args...)
@@ -55,6 +64,7 @@ func (e *env) runWithUpdateAPI(apiBase, versionOverride string, args ...string) 
 		"JOBTAIL_DATA_DIR="+e.dataDir,
 		"JOBTAIL_DISABLE_NOTIFY=1",
 		"JOBTAIL_UPDATE_API="+apiBase,
+		"JOBTAIL_UPDATE_BASE="+apiBase,
 		"JOBTAIL_VERSION_OVERRIDE="+versionOverride,
 	)
 	var buf bytes.Buffer
@@ -184,6 +194,7 @@ func TestUpgradeInstallsNewerRelease(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"JOBTAIL_DATA_DIR="+e.dataDir,
 		"JOBTAIL_UPDATE_API="+apiBase,
+		"JOBTAIL_UPDATE_BASE="+apiBase,
 		"JOBTAIL_VERSION_OVERRIDE=v1.0.0",
 	)
 	out, err := cmd.CombinedOutput()
@@ -216,6 +227,7 @@ func TestUpgradeSkipsWhenAlreadyLatest(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"JOBTAIL_DATA_DIR="+e.dataDir,
 		"JOBTAIL_UPDATE_API="+apiBase,
+		"JOBTAIL_UPDATE_BASE="+apiBase,
 		"JOBTAIL_VERSION_OVERRIDE=v1.0.0",
 	)
 	out, err := cmd.CombinedOutput()
@@ -248,6 +260,7 @@ func TestUpgradeCheckFlagNeverInstalls(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"JOBTAIL_DATA_DIR="+e.dataDir,
 		"JOBTAIL_UPDATE_API="+apiBase,
+		"JOBTAIL_UPDATE_BASE="+apiBase,
 		"JOBTAIL_VERSION_OVERRIDE=v1.0.0",
 	)
 	out, err := cmd.CombinedOutput()
@@ -269,8 +282,13 @@ func TestUpgradeCheckFlagNeverInstalls(t *testing.T) {
 
 func TestUpgradeErrorsWithoutMatchingAsset(t *testing.T) {
 	e := newEnv(t)
-	// A release with no asset at all for this platform.
+	// A release returned by the API fallback with no asset at all for this
+	// platform. The API endpoint is reached only after the redirect lookup
+	// (served here as a 404) has failed.
 	mux := http.NewServeMux()
+	mux.HandleFunc("/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
 	mux.HandleFunc("/repos/dalogax/jobtail/releases/latest", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"tag_name": "v2.0.0", "assets": []map[string]string{}})
 	})
@@ -282,6 +300,7 @@ func TestUpgradeErrorsWithoutMatchingAsset(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"JOBTAIL_DATA_DIR="+e.dataDir,
 		"JOBTAIL_UPDATE_API="+srv.URL,
+		"JOBTAIL_UPDATE_BASE="+srv.URL,
 		"JOBTAIL_VERSION_OVERRIDE=v1.0.0",
 	)
 	out, err := cmd.CombinedOutput()
