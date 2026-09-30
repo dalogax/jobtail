@@ -1,0 +1,18 @@
+e2e/phase5_upgrade_test.go
+  h_e3d1ad069ecc4d 48-53,57-59,67,197,230,263,285-287,289-291,303
+internal/selfupdate/selfupdate.go
+  h_e3d1ad069ecc4d 4-10,19,23,43-63,67-71,85-103,105-161,166-168,174-179,181,240,258-260,298-302
+internal/selfupdate/selfupdate_test.go
+  h_e3d1ad069ecc4d 1-164
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c1cf402cb5029f09cc88ae8290afd44e50a5af46",
+  "prompts": {},
+  "humans": {
+    "h_e3d1ad069ecc4d": {
+      "author": "Daniel López García <daniellgarc@inditex.com>"
+    }
+  }
+}
