@@ -679,8 +679,10 @@ func scanRun(row *sql.Row) (Run, error) {
 	return r, nil
 }
 
+// ListRuns returns newest first. Zero uses the default page size; -1 loads
+// all retained runs for views that fold consecutive skips into one row.
 func (s *Store) ListRuns(ctx context.Context, jobID string, limit int) ([]Run, error) {
-	if limit <= 0 {
+	if limit == 0 || limit < -1 {
 		limit = 200
 	}
 	rows, err := s.db.QueryContext(ctx, `

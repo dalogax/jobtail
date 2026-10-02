@@ -267,9 +267,12 @@ type model struct {
 	st      *store.Store
 	logsDir string
 
-	focus focusPane
-	jobs  []store.JobSummary
-	runs  []store.Run
+	focus       focusPane
+	jobs        []store.JobSummary
+	runs        []store.Run
+	runEntries  []runEntry
+	runExpanded map[string]bool
+	selection   textSelection
 	// runsJobID is whose runs are in runs — needed because a selection
 	// change and the load that answers it are a round trip apart, so runs
 	// can briefly belong to the previously selected job.
@@ -344,7 +347,7 @@ type layoutKey struct {
 }
 
 func (m model) layoutKey() layoutKey {
-	return layoutKey{m.width, m.height, m.focus, len(m.jobs), len(m.runs)}
+	return layoutKey{m.width, m.height, m.focus, len(m.jobs), m.runRowCount()}
 }
 
 // renderFPS caps Bubble Tea's renderer. Its default is 60, which costs a
@@ -460,7 +463,7 @@ func (m model) reloadRuns(jobID string) tea.Cmd {
 
 func reloadRunsCmd(ctx context.Context, st *store.Store, jobID string, shown []store.Run, shownIsThisJob bool) tea.Cmd {
 	return func() tea.Msg {
-		runs, err := st.ListRuns(ctx, jobID, 200)
+		runs, err := st.ListRuns(ctx, jobID, -1) // all retained history, including folded skips
 		if err == nil && shownIsThisJob && slices.Equal(runs, shown) {
 			return nil
 		}
@@ -563,6 +566,7 @@ func resumeCmd(j store.Job, r store.Run) tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		m.selection = textSelection{}
 		m.width, m.height = msg.Width, msg.Height
 		m.layout()
 		return m, nil
@@ -608,11 +612,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		prevRunID, _ := m.selectedRun()
+		prevEntry := m.selectedRunEntry()
+		if m.runsJobID != msg.jobID {
+			m.runExpanded = nil
+		}
 		m.runs, m.runsJobID = msg.runs, msg.jobID
-		m.runsTable.SetRows(runRows(msg.runs, m.runsCols))
+		m.rebuildRunEntries()
 		m.layout()
 		if prevRunID != "" {
 			m.selectRunByID(prevRunID)
+			if prevEntry.group {
+				for i, e := range m.runEntries {
+					if e.group && e.key == prevEntry.key {
+						m.runsTable.SetCursor(i)
+						break
+					}
+				}
+			}
 		} else if len(msg.runs) > 0 {
 			m.runsTable.SetCursor(0)
 		}
@@ -650,6 +666,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.statusMsg = fmt.Sprintf("resumed in pane %s", msg.paneID)
+		return m, nil
+	case copiedMsg:
+		if msg.err != nil {
+			m.statusMsg = fmt.Sprintf("copy failed: %v", msg.err)
+		} else {
+			m.statusMsg = "selection copied"
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -965,8 +988,8 @@ func (m model) topRowHeight(avail int) int {
 	rows := len(m.jobs)
 	// Unless you're actually reading run history, in which case that pane
 	// is what the rows are for.
-	if m.focus == focusRuns && len(m.runs) > rows {
-		rows = len(m.runs)
+	if m.focus == focusRuns && m.runRowCount() > rows {
+		rows = m.runRowCount()
 	}
 	if rows < 6 {
 		rows = 6 // don't collapse to a sliver when there are few jobs
@@ -1008,7 +1031,7 @@ func (m model) stackedHeights(avail int) (jobs, runs, log int) {
 		}
 		return n + 1 + boxChromeY
 	}
-	jobs, runs = need(len(m.jobs)), need(len(m.runs))
+	jobs, runs = need(len(m.jobs)), need(m.runRowCount())
 	log = minBox + 1
 
 	cap := avail / 3
@@ -1040,7 +1063,7 @@ func (m model) stackedHeights(avail int) (jobs, runs, log int) {
 			spare -= take
 		case focusRuns:
 			take := spare
-			if want := need(len(m.runs)) - runs; take > want {
+			if want := need(m.runRowCount()) - runs; take > want {
 				take = want
 			}
 			if take < 0 {
@@ -1223,6 +1246,7 @@ func (m *model) setFocus(p focusPane) {
 }
 
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.selection = textSelection{}
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
@@ -1233,6 +1257,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "enter":
+		if m.focus == focusRuns && m.selectedRunEntry().group {
+			return m.toggleRunGroup()
+		}
 		// In the log pane there is no deeper pane to open, so enter is the
 		// fold toggle for the block under the cursor.
 		if m.focus == focusLog {
@@ -1324,6 +1351,10 @@ func (m model) paneAt(x, y int) (pane focusPane, paneTop int) {
 // handleMouse maps a click/wheel event to a pane and, for a left-click, to
 // a row within that pane's table.
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	return m.selectWithMouse(msg)
+}
+
+func (m model) clickAt(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	pane, paneTop := m.paneAt(msg.X, msg.Y)
 
 	switch msg.Button {
@@ -1356,7 +1387,7 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, m.reloadRuns(newID)
 		}
 	case focusRuns:
-		if row >= len(m.runs) {
+		if row >= m.runRowCount() {
 			return m, nil
 		}
 		prevID, _ := m.selectedRun()
@@ -1489,7 +1520,7 @@ func (m *model) selectJobByID(id string) {
 // selectedRunRow is the whole selected run, where selectedRun returns only
 // the two fields the log pane needs. Resuming needs the session id too.
 func (m model) selectedRunRow() *store.Run {
-	idx := m.runsTable.Cursor()
+	idx := m.selectedRunEntry().first
 	if idx < 0 || idx >= len(m.runs) {
 		return nil
 	}
@@ -1542,26 +1573,31 @@ func (m model) resumeSelectedRun() (tea.Model, tea.Cmd) {
 }
 
 func (m model) selectedRun() (id string, logPath string) {
-	idx := m.runsTable.Cursor()
-	if idx < 0 || idx >= len(m.runs) {
-		return "", ""
+	if r := m.selectedRunRow(); r != nil {
+		return r.ID, r.LogPath
 	}
-	return m.runs[idx].ID, m.runs[idx].LogPath
+	return "", ""
 }
 
 func (m model) isSelectedRunRunning() bool {
-	idx := m.runsTable.Cursor()
-	if idx < 0 || idx >= len(m.runs) {
-		return false
+	if r := m.selectedRunRow(); r != nil {
+		return r.Status == "running"
 	}
-	return m.runs[idx].Status == "running"
+	return false
 }
 
 func (m *model) selectRunByID(id string) {
-	for i, r := range m.runs {
-		if r.ID == id {
-			m.runsTable.SetCursor(i)
-			return
+	for i := range m.runRowCount() {
+		e := m.runEntryAt(i)
+		for j := e.first; j < e.end; j++ {
+			if m.runs[j].ID == id {
+				// Prefer the individual row when this group is expanded.
+				if e.group && m.runExpanded[e.key] {
+					continue
+				}
+				m.runsTable.SetCursor(i)
+				return
+			}
 		}
 	}
 }
@@ -1715,6 +1751,13 @@ func statusStyle(s string) lipgloss.Style {
 }
 
 func (m model) View() string {
+	if m.selection.active {
+		return m.selection.render()
+	}
+	return m.dashboardView()
+}
+
+func (m model) dashboardView() string {
 	if m.width == 0 {
 		return "loading..."
 	}
@@ -1747,7 +1790,15 @@ func (m model) View() string {
 			m.logPane(m.height-1-m.topBoxHeight))
 	}
 
-	return body + "\n" + renderHelpBar(m.width, m.focus, m.statusMsg, m.canResumeSelection(), len(m.logView.stops) > 0)
+	canFold := len(m.logView.stops) > 0
+	hints := hintsFor(m.focus, m.canResumeSelection(), canFold)
+	if m.focus == focusRuns && m.selectedRunEntry().group {
+		hints = hintsFor(m.focus, false, false)
+		hints[1] = helpHint{key: "enter", long: "fold skips", short: "fold", drop: 2}
+		hints = append(hints, helpHint{key: "→", long: "latest log", short: "log", drop: 4})
+	}
+	hints = append(hints, helpHint{key: "drag", long: "select & copy", short: "copy", drop: 5})
+	return body + "\n" + renderHints(m.width, m.statusMsg, hints)
 }
 
 func (m model) jobsPane(boxHeight int) string {
@@ -1777,7 +1828,7 @@ func (m model) runsPane(boxHeight int) string {
 		}
 		content = m.emptyBody(styleMessage(msg), m.runsBoxWidth, boxHeight)
 	}
-	return renderPane(m.paneTitle(title, m.runsTable.Cursor(), len(m.runs)),
+	return renderPane(m.paneTitle(title, m.runsTable.Cursor(), m.runRowCount()),
 		accentRuns, m.focus == focusRuns, content)
 }
 
@@ -1809,6 +1860,11 @@ func (m model) logPaneTitle() string {
 		}
 		label = fmt.Sprintf("Log %s · %s · %s", name,
 			run.StartedAt.Local().Format("01-02 15:04:05"), run.ID)
+		if e := m.selectedRunEntry(); e.group {
+			label = fmt.Sprintf("Log %s · %d skips %s–%s · latest: %s", name, e.end-e.first,
+				m.runs[e.end-1].StartedAt.Local().Format("01-02 15:04"),
+				run.StartedAt.Local().Format("01-02 15:04"), run.ID)
+		}
 	}
 	return m.paneTitle(label, 0, 0)
 }
@@ -2116,7 +2172,10 @@ func hintsFor(focus focusPane, canResume, canFold bool) []helpHint {
 // said how to exit), and at 60 it cut mid-word to "e enable/dis". Hints now
 // shorten, then drop whole, worst-priority first.
 func renderHelpBar(width int, focus focusPane, statusMsg string, canResume, canFold bool) string {
-	hints := hintsFor(focus, canResume, canFold)
+	return renderHints(width, statusMsg, hintsFor(focus, canResume, canFold))
+}
+
+func renderHints(width int, statusMsg string, hints []helpHint) string {
 	key := func(k, desc string) string {
 		return helpKeyStyle.Render(k) + helpStyle.Render(" "+desc)
 	}
@@ -2236,4 +2295,4 @@ func wrapForViewport(content string, width int) string {
 // set. They exist as methods so setTableWidth can rebuild rows at the exact
 // moment it swaps columns, without knowing where the data lives.
 func (m *model) jobRowsFor(cols []table.Column) []table.Row { return jobRows(m.jobs, cols) }
-func (m *model) runRowsFor(cols []table.Column) []table.Row { return runRows(m.runs, cols) }
+func (m *model) runRowsFor(cols []table.Column) []table.Row { return m.groupedRunRows(cols) }
