@@ -1,0 +1,35 @@
+README.md
+  s_f9aa332b01592e::t_e18739495dc209 70-71,119-120
+go.mod
+  s_f9aa332b01592e::t_1fba83ffe280e3 9
+internal/store/store.go
+  s_f9aa332b01592e::t_4f449a093d0655 682-683,685
+internal/tui/run_groups.go
+  s_f9aa332b01592e::t_a0221ce86c7fc8 1-108
+internal/tui/run_groups_test.go
+  s_f9aa332b01592e::t_01f2a2e7995d9e 1-121
+internal/tui/selection.go
+  s_f9aa332b01592e::t_aa852a3f697b2a 1-150
+internal/tui/selection_test.go
+  s_f9aa332b01592e::t_2a3f95abfa6bb5 1-173
+internal/tui/tui.go
+  s_f9aa332b01592e::t_810e3caf4bdeb4 270-275,350,466,569,615-618,620,624-631,670-676,991-992,1034,1066,1249,1260-1262,1354-1357,1390,1523,1576-1577,1579,1583-1584,1586,1590-1600,1754-1760,1793-1801,1831,1863-1867,2175-2178,2298
+internal/tui/tui_test.go
+  s_f9aa332b01592e::t_5773cd0896e201 114-119,316,324,337,345,427
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c6fd9cef28fa45f27a9b95eac02632595339c188",
+  "prompts": {},
+  "sessions": {
+    "s_f9aa332b01592e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f0453d64cffeeUZIqXtqnkwFn5",
+        "model": "unknown"
+      },
+      "human_author": "Daniel López García <daniellgarc@inditex.com>"
+    }
+  }
+}
