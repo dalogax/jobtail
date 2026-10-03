@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -133,4 +134,68 @@ func TestUnsetTimeoutMeansTheDefault(t *testing.T) {
 	if unset.Timeout() != DefaultTimeout || set.Timeout() != 10*time.Minute {
 		t.Fatalf("timeouts: unset=%s set=%s, want %s/10m", unset.Timeout(), set.Timeout(), DefaultTimeout)
 	}
+}
+
+// StartRun reads (how many runs are active) and then writes (the new run)
+// in one transaction. As a plain deferred BEGIN, another process
+// committing between the two made the write fail at once with
+// SQLITE_BUSY — busy_timeout can't help, since waiting never makes a stale
+// read snapshot current. Seen in CI as `jobtail run` dying with "database
+// is locked" while an earlier run of the same job was recording its pids.
+// Separate Store handles stand in for separate jobtail processes.
+func TestStartRunSurvivesConcurrentWriters(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "t.db")
+	ctx := context.Background()
+	open := func() *Store {
+		st, err := Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { st.Close() })
+		return st
+	}
+	setup := open()
+	if err := setup.CreateJob(ctx, Job{ID: "j", Kind: "cli", Cron: "0 0 * * *", Timezone: "local",
+		Cwd: "/tmp", Command: "true", MaxConcurrent: 1 << 30, Keep: 200}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setup.StartRun(ctx, "j", "busy", "manual", "/dev/null", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan struct{})
+	writerDone := make(chan struct{})
+	writer := open()
+	go func() {
+		defer close(writerDone)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = writer.SetRunChildPID(ctx, "busy", i)
+		}
+	}()
+
+	errs := make(chan error, 4)
+	for w := 0; w < 4; w++ {
+		st := open()
+		go func(w int) {
+			for i := 0; i < 50; i++ {
+				if _, err := st.StartRun(ctx, "j", fmt.Sprintf("r-%d-%d", w, i), "manual", "/dev/null", time.Now()); err != nil {
+					errs <- err
+					return
+				}
+			}
+			errs <- nil
+		}(w)
+	}
+	for w := 0; w < 4; w++ {
+		if err := <-errs; err != nil {
+			t.Errorf("StartRun under concurrent writers: %v", err)
+		}
+	}
+	close(stop)
+	<-writerDone
 }
