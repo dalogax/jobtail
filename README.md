@@ -67,6 +67,8 @@ Agent transcripts are parsed into blocks, not dumped as JSON: assistant text, ea
 
 It live-tails while a run is in progress, and failed runs are red, so "is anything broken?" is answered without opening anything.
 
+Drag to select any visible dashboard text — logs, table rows, titles or help — and release to copy it automatically to the clipboard. A plain click still focuses panes and selects rows. Copying uses the system clipboard on macOS and Linux (with `wl-copy`, `xclip` or `xsel`), falling back to OSC 52 where the terminal allows clipboard access.
+
 ### Pick a session back up
 
 Every agent run's session id is captured the moment it starts, even if the run later fails. Press **`r`** on it — or `jobtail resume <run-id>` — and the CLI that produced it reopens *that exact conversation*, rooted at the job's working directory: `claude --resume`, `opencode --session`, or `codex resume`.
@@ -113,6 +115,8 @@ Exit `0` and the job runs, with the precheck's output appended to the prompt as 
 Add `--notify started,failed,timeout` to get a Herdr notification when the gate finds work and the agent starts, not only when something breaks.
 
 The precheck's output is always written to the run's log, so a skipped run still shows what it saw.
+
+Consecutive precheck skips share one collapsed row in the dashboard, such as `+ skipped ×42`, so they don't bury actual runs. The row shows the latest start time and the streak's time span in `Dur`. **Enter** on the stack expands or collapses it; individual rows open their own logs as usual. **→** on a stack opens the latest skip's log, with the count and date range in its title. Overlap skips, failures and actual runs are not folded together. All retained history is loaded; folding changes only the display, not retention or stored logs.
 
 <details>
 <summary><b>It fits the terminal you actually have</b></summary>

@@ -111,6 +111,12 @@ func runCmd(cmd tea.Cmd) []tea.Msg {
 func key(r rune) tea.KeyMsg            { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}} }
 func special(t tea.KeyType) tea.KeyMsg { return tea.KeyMsg{Type: t} }
 
+func click(t testing.TB, m model, x, y int) model {
+	t.Helper()
+	m = send(t, m, tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	return send(t, m, tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
+}
+
 // TestLongLogLineIsWrappedNotCropped is the regression test for a real bug
 // found by actually reading a long agent transcript in the TUI: a single
 // long paragraph (no internal newlines — a common shape for prose a model
@@ -307,7 +313,7 @@ func TestMouseClickSelectsRowAndSwitchesPane(t *testing.T) {
 	// because the pane title lives inside the border rule rather than on a
 	// content row of its own. So Y=2 is the first data row and Y=3 the
 	// second, which is "greet" once jobs are sorted alphabetically.
-	m = send(t, m, tea.MouseMsg{X: 5, Y: 3, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	m = click(t, m, 5, 3)
 	if got := m.selectedJobID(); got != "greet" {
 		t.Fatalf("click should have selected 'greet' (2nd row), got %q", got)
 	}
@@ -315,7 +321,7 @@ func TestMouseClickSelectsRowAndSwitchesPane(t *testing.T) {
 	// The first data row must be clickable at all: while rowAtY still
 	// assumed a title row, Y=2 mapped to index -1 and was discarded, so
 	// the top entry in every table simply could not be selected by mouse.
-	m = send(t, m, tea.MouseMsg{X: 5, Y: 2, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	m = click(t, m, 5, 2)
 	if got := m.selectedJobID(); got != "abbey" {
 		t.Fatalf("clicking the first data row should select 'abbey', got %q", got)
 	}
@@ -328,7 +334,7 @@ func TestMouseClickSelectsRowAndSwitchesPane(t *testing.T) {
 	// counts and so different real widths (this is exactly the bug that
 	// broke real mouse clicks: the boundary math and the render math
 	// disagreed with each other).
-	m = send(t, m, tea.MouseMsg{X: m.jobsBoxWidth + 5, Y: 4, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	m = click(t, m, m.jobsBoxWidth+5, 4)
 	if m.focus != focusRuns {
 		t.Fatalf("clicking in the runs pane's x-range should focus it, got %v", m.focus)
 	}
@@ -336,7 +342,7 @@ func TestMouseClickSelectsRowAndSwitchesPane(t *testing.T) {
 	// Log spans the full width below jobs/runs now (not a third column to
 	// the right of them) — a click there needs Y past topBoxHeight, X is
 	// irrelevant.
-	m = send(t, m, tea.MouseMsg{X: 5, Y: m.topBoxHeight + 1, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	m = click(t, m, 5, m.topBoxHeight+1)
 	if m.focus != focusLog {
 		t.Fatalf("clicking below the top row should focus the log pane, got %v", m.focus)
 	}
@@ -418,7 +424,7 @@ func TestMouseClickOutOfRangeIsIgnoredNotACrash(t *testing.T) {
 
 	before := m.selectedJobID()
 	// Far below any real row (only 1 seeded job).
-	m = send(t, m, tea.MouseMsg{X: 5, Y: 30, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	m = click(t, m, 5, 30)
 	if got := m.selectedJobID(); got != before {
 		t.Fatalf("an out-of-range click should not change the selection, got %q want %q", got, before)
 	}
