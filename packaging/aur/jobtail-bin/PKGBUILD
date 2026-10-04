@@ -1,0 +1,26 @@
+# Maintainer: Daniel Lopez Garcia <dalogax at gmail dot com>
+pkgname=jobtail-bin
+pkgver=0.5.0
+pkgrel=1
+pkgdesc="Cron for coding agents: schedule shell commands and headless Claude Code/opencode/Codex runs, read every run in a TUI"
+arch=('x86_64' 'aarch64')
+url="https://github.com/dalogax/jobtail"
+license=('MIT')
+provides=('jobtail')
+conflicts=('jobtail')
+optdepends=('claude-code: run agent jobs with Claude Code'
+            'opencode: run agent jobs with opencode'
+            'openai-codex: run agent jobs with Codex')
+install=jobtail.install
+options=('!strip' '!debug')
+source=("LICENSE-${pkgver}::https://raw.githubusercontent.com/dalogax/jobtail/v${pkgver}/LICENSE")
+source_x86_64=("jobtail-${pkgver}-x86_64::https://github.com/dalogax/jobtail/releases/download/v${pkgver}/jobtail-linux-amd64")
+source_aarch64=("jobtail-${pkgver}-aarch64::https://github.com/dalogax/jobtail/releases/download/v${pkgver}/jobtail-linux-arm64")
+sha256sums=('SKIP')
+sha256sums_x86_64=('ec7d6ed2e21c6ef66ff328500ad7e40283703739d3ce208a853855af03509578')
+sha256sums_aarch64=('1aaaae15d1abd451eb44aebdfadb03887d1bda25717951ac93f13b6ac17d27c7')
+
+package() {
+  install -Dm755 "jobtail-${pkgver}-${CARCH}" "${pkgdir}/usr/bin/jobtail"
+  install -Dm644 "LICENSE-${pkgver}" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

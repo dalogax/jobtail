@@ -1,0 +1,24 @@
+pkgbase = jobtail-bin
+	pkgdesc = Cron for coding agents: schedule shell commands and headless Claude Code/opencode/Codex runs, read every run in a TUI
+	pkgver = 0.5.0
+	pkgrel = 1
+	url = https://github.com/dalogax/jobtail
+	install = jobtail.install
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	optdepends = claude-code: run agent jobs with Claude Code
+	optdepends = opencode: run agent jobs with opencode
+	optdepends = openai-codex: run agent jobs with Codex
+	provides = jobtail
+	conflicts = jobtail
+	options = !strip
+	options = !debug
+	source = LICENSE-0.5.0::https://raw.githubusercontent.com/dalogax/jobtail/v0.5.0/LICENSE
+	sha256sums = SKIP
+	source_x86_64 = jobtail-0.5.0-x86_64::https://github.com/dalogax/jobtail/releases/download/v0.5.0/jobtail-linux-amd64
+	sha256sums_x86_64 = ec7d6ed2e21c6ef66ff328500ad7e40283703739d3ce208a853855af03509578
+	source_aarch64 = jobtail-0.5.0-aarch64::https://github.com/dalogax/jobtail/releases/download/v0.5.0/jobtail-linux-arm64
+	sha256sums_aarch64 = 1aaaae15d1abd451eb44aebdfadb03887d1bda25717951ac93f13b6ac17d27c7
+
+pkgname = jobtail-bin

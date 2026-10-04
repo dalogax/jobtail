@@ -135,7 +135,8 @@ func maybeSuggestUpdate(ran *cobra.Command) {
 	if err := os.MkdirAll(dd, 0o700); err != nil {
 		return
 	}
-	if msg := selfupdate.CheckForUpdate(context.Background(), dd, currentVersion()); msg != "" {
+	exe, _ := executablePath()
+	if msg := selfupdate.CheckForUpdate(context.Background(), dd, currentVersion(), exe); msg != "" {
 		fmt.Fprintln(os.Stderr, "jobtail:", msg)
 	}
 }
