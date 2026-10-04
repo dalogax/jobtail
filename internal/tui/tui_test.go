@@ -234,8 +234,8 @@ func TestTUINavigatesJobsToRunsToLog(t *testing.T) {
 	if !strings.Contains(m.View(), "greet") {
 		t.Fatalf("initial view missing job id 'greet':\n%s", m.View())
 	}
-	if !strings.Contains(m.View(), "● greet") {
-		t.Fatalf("expected the enabled marker on greet:\n%s", m.View())
+	if strings.Contains(jobLine(m.View(), "greet"), "disabled") {
+		t.Fatalf("greet should start out enabled:\n%s", m.View())
 	}
 	// The jobs pane's last-status cell is its rightmost column — exactly
 	// what a viewport-width miscalculation clips first without an obvious
@@ -263,7 +263,7 @@ func TestTUINavigatesJobsToRunsToLog(t *testing.T) {
 	// The log title must identify what we are looking at: job name, local
 	// start time, run id. A bare "Log" loses the job↔run association the
 	// moment more than one job exists.
-	if !strings.Contains(m.View(), "Log greet · ") {
+	if !strings.Contains(m.View(), "Log · greet · ") {
 		t.Fatalf("log title missing job name:\n%s", m.View())
 	}
 	if !strings.Contains(m.View(), "seed-run-1") {
@@ -277,12 +277,12 @@ func TestTUINavigatesJobsToRunsToLog(t *testing.T) {
 	}
 
 	m = send(t, m, key('e')) // disable
-	if !strings.Contains(m.View(), "○ greet") {
-		t.Fatalf("expected the disabled marker after 'e':\n%s", m.View())
+	if !strings.Contains(jobLine(m.View(), "greet"), "disabled") {
+		t.Fatalf("expected greet to read as disabled after 'e':\n%s", m.View())
 	}
 	m = send(t, m, key('e')) // re-enable
-	if !strings.Contains(m.View(), "● greet") {
-		t.Fatalf("expected the enabled marker after 'e' again:\n%s", m.View())
+	if strings.Contains(jobLine(m.View(), "greet"), "disabled") {
+		t.Fatalf("expected greet to read as enabled after 'e' again:\n%s", m.View())
 	}
 }
 
@@ -545,4 +545,15 @@ func TestTUIRunNowExecutesThroughRunner(t *testing.T) {
 	if len(m.runs) != len(after) {
 		t.Fatalf("runs pane didn't pick up the new run: have %d, want %d", len(m.runs), len(after))
 	}
+}
+
+// jobLine is the jobs-pane row for id, as plain text: the first frame line
+// that names it.
+func jobLine(frame, id string) string {
+	for _, l := range strings.Split(plain(frame), "\n") {
+		if strings.HasPrefix(l, "│") && strings.Contains(l, " "+id+" ") {
+			return l
+		}
+	}
+	return ""
 }

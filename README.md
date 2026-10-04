@@ -13,9 +13,9 @@
   <img src="https://img.shields.io/badge/deps-one%20static%20binary-informational" alt="one static binary">
 </p>
 
-<p align="center"><img src="docs/demo.gif" alt="jobtail: adding a shell job and an agent job, running one from the dashboard, folding through an agent transcript, and resuming that session" width="900"></p>
+<p align="center"><img src="docs/demo.gif" alt="jobtail: adding a shell job and an agent job, running one from the dashboard, opening the key list, folding through an agent transcript, and resuming that session" width="900"></p>
 
-<p align="center"><sub>Add two jobs → run one now → fold through the agent's transcript → pick the session back up. <a href="scripts/demo/demo.tape">How this was recorded.</a></sub></p>
+<p align="center"><sub>Add two jobs → run one now → <code>?</code> for every key → fold through the agent's transcript → pick the session back up. <a href="scripts/demo/demo.tape">How this was recorded.</a></sub></p>
 
 ## Install
 
@@ -64,8 +64,11 @@ Agent transcripts are parsed into blocks, not dumped as JSON: assistant text, ea
 | `o` | unfold everything |
 | `↑` `↓` | scroll |
 | `r` | resume this run's session |
+| `?` | every key, for every pane |
 
-It live-tails while a run is in progress, and failed runs are red, so "is anything broken?" is answered without opening anything.
+It live-tails while a run is in progress, with its elapsed time counting up in the runs pane. Every status is a glyph, a word and a color — `✓ ok`, `✗ failed`, `● running`, `· never` — so "is anything broken?" is answered without opening anything, at any width and under `NO_COLOR`. A disabled job is drawn faint, with `disabled` where its next run would be.
+
+`?` opens the full key list from anywhere; the footer shows only the keys for the pane you're in and drops the least important first when the terminal is narrow.
 
 Drag to select any visible dashboard text — logs, table rows, titles or help — and release to copy it automatically to the clipboard. A plain click still focuses panes and selects rows. Copying uses the system clipboard on macOS and Linux (with `wl-copy`, `xclip` or `xsel`), falling back to OSC 52 where the terminal allows clipboard access.
 
@@ -133,7 +136,7 @@ Consecutive precheck skips share one collapsed row in the dashboard, such as `+ 
 
 Columns drop whole rather than collapsing into ellipses, worst-first, so what's left stays readable — job names and statuses survive longest; run counts and cron expressions go first. Spare width goes the other way: a wide terminal gains a `Cron` column on jobs and an `Exit` column on runs. Panes are sized to their contents, so a long job list gets the rows it needs instead of a fixed fraction of the screen.
 
-On a phone-sized terminal — SSH from a handset, a narrow split — you get one pane, full width, and move through jobs → runs → log with `enter` and `esc` exactly as before.
+On a phone-sized terminal — SSH from a handset, a narrow split — you get one pane, full width, and move through jobs → runs → log with `enter` and `esc` exactly as before. Below 28×7 it says so, with the size it needs, instead of drawing a clipped frame.
 
 </details>
 

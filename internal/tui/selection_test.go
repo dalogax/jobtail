@@ -76,7 +76,7 @@ func TestDashboardDragCopiesWithoutNavigating(t *testing.T) {
 			if pane == focusRuns {
 				target = "ok"
 				y = 2
-				x = 3
+				x = 6 // border, pad, cursor gutter, pad, "✓ "
 				if m.mode == layoutWide {
 					x += m.jobsBoxWidth
 				}

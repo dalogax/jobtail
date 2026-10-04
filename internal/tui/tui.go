@@ -17,7 +17,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/cellbuf"
-	"github.com/mattn/go-runewidth"
 
 	"github.com/dalogax/jobtail/internal/cronx"
 	"github.com/dalogax/jobtail/internal/execengine"
@@ -40,26 +39,6 @@ const (
 // not a const, so tests can shrink it and avoid paying a real 1s sleep per
 // resolved tick — see internal/tui/tui_test.go's init().
 var refreshInterval = time.Second
-
-// Per-pane accent colors (btop-style: each panel gets its own hue rather
-// than one generic "focused" blue) — picked to echo btop's own cpu/mem/net
-// panel colors (violet/green/blue) since that's the specific look this was
-// modeled on.
-var (
-	accentJobs    = lipgloss.Color("39")  // blue
-	accentRuns    = lipgloss.Color("135") // violet
-	accentLog     = lipgloss.Color("42")  // green
-	dimPaneColor  = lipgloss.Color("240") // unfocused border/title — same muted gray as before
-	roundedPane   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
-	helpStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	helpKeyStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true)
-	statusOK      = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	statusFailed  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	statusRunning = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	statusNever   = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	emptyStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	emptyCmdStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
-)
 
 // layoutMode is how the three panes are arranged for the terminal we
 // actually got. The dashboard's interaction model is already a drill-down
@@ -117,9 +96,8 @@ type colSpec struct {
 	drop  int
 }
 
-// perCellPadding is what bubbles/table's default Cell/Header style
-// (Padding(0, 1)) adds to every column on top of its declared width — one
-// column of padding on each side. See columnsWidth.
+// perCellPadding is what grid adds to every column on top of its declared
+// width — one column of padding on each side. See columnsWidth.
 const perCellPadding = 2
 
 // fitColumns decides which columns survive at the given content width and
@@ -278,8 +256,8 @@ type model struct {
 	// can briefly belong to the previously selected job.
 	runsJobID string
 
-	jobsTable table.Model
-	runsTable table.Model
+	jobsTable grid
+	runsTable grid
 	logVP     viewport.Model
 
 	// What the log pane holds, and what it was built from. logShown is the
@@ -306,6 +284,7 @@ type model struct {
 	width, height int
 	err           error
 	statusMsg     string
+	showHelp      bool            // the ? key list is open
 	running       map[string]bool // job IDs with an in-flight "run now" from the TUI
 	resuming      map[string]bool // run IDs with a Herdr tab already opening
 
@@ -378,8 +357,8 @@ const defaultPaneWidth = 40
 
 func newModel(st *store.Store, logsDir string) model {
 	jobCols, runCols := jobsColumns(defaultPaneWidth), runsColumns(defaultPaneWidth)
-	jt := table.New(table.WithColumns(jobCols), table.WithFocused(true))
-	rt := table.New(table.WithColumns(runCols), table.WithFocused(false))
+	jt := newGrid(jobCols, accentJobs, true)
+	rt := newGrid(runCols, accentRuns, false)
 	vp := viewport.New(20, 10)
 
 	return model{
@@ -572,6 +551,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
+		// A running run's Dur counts up. The reload below skips an unchanged
+		// run list, so redraw those rows from what is already in memory —
+		// only while something is running, so an idle dashboard stays idle.
+		if slices.ContainsFunc(m.runs, func(r store.Run) bool { return r.Status == "running" }) {
+			m.runsTable.SetRows(m.groupedRunRows(m.runsCols))
+		}
 		cmds := []tea.Cmd{tick(), m.reloadJobs()}
 		if jobID := m.selectedJobID(); jobID != "" {
 			cmds = append(cmds, m.reloadRuns(jobID))
@@ -589,6 +574,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err
 			return m, nil
 		}
+		m.err = nil
 		prevID := m.selectedJobID()
 		m.jobs = msg.jobs
 		m.jobsTable.SetRows(jobRows(msg.jobs, m.jobsCols))
@@ -712,9 +698,9 @@ const (
 // called with a value the table already has.
 //
 // Columns and rows are swapped together, through an empty row set, because
-// bubbles/table indexes its column slice by the row's cell position
-// (renderRow: `for i := range m.rows[r] { m.cols[i] ... }`) and *both*
-// setters re-render immediately. A table left holding six-cell rows against
+// bubbles/table — what these tables were before grid — indexed its column
+// slice by the row's cell position (renderRow: `for i := range m.rows[r] {
+// m.cols[i] ... }`) and *both* setters re-rendered immediately. A table left holding six-cell rows against
 // a five-column set therefore panics inside the setter itself, before
 // anything gets the chance to rebuild the rows.
 //
@@ -724,9 +710,9 @@ const (
 // dashboard vanishes mid-session. Building rows from the column set
 // (cellsFor) made them consistent at any one size; it did not make the
 // transition between two sizes safe.
-func setTableWidth(t *table.Model, boxWidth int, cols func(int) []table.Column,
+func setTableWidth(t *grid, boxWidth int, cols func(int) []table.Column,
 	rows func([]table.Column) []table.Row) (int, []table.Column) {
-	content := boxWidth - boxChromeX
+	content := boxWidth - boxChromeX - gridGutter
 	if content < 1 {
 		content = 1
 	}
@@ -738,7 +724,7 @@ func setTableWidth(t *table.Model, boxWidth int, cols func(int) []table.Column,
 		t.SetRows(rows(c))
 		t.SetCursor(cursor) // SetRows(nil) drops the selection; put it back
 	}
-	w := columnsWidth(c)
+	w := columnsWidth(c) + gridGutter
 	if t.Width() != w {
 		t.SetWidth(w)
 	}
@@ -1092,7 +1078,7 @@ func (m model) stackedHeights(avail int) (jobs, runs, log int) {
 	return jobs, runs, log
 }
 
-func setBoxHeight(t *table.Model, boxHeight int) {
+func setBoxHeight(t *grid, boxHeight int) {
 	h := boxHeight - boxChromeY
 	if h < 2 { // header + at least one data row
 		h = 2
@@ -1111,9 +1097,8 @@ func viewportHeight(boxHeight int) int {
 // columnsWidth sums what SetColumns just laid out, so the table's viewport
 // (which SetWidth controls) never clips a cell short of its own declared
 // width — a mismatch there is what silently truncated column content
-// mid-cell before this was fixed. +2 per column: bubbles/table's default
-// Cell/Header style is Padding(0, 1) — one padding column on each side —
-// which is real rendered width the raw Column.Width doesn't include; missing
+// mid-cell before this was fixed. +2 per column: each cell is padded one
+// column on each side (perCellPadding), which is real rendered width the raw Column.Width doesn't include; missing
 // it here under-sized the viewport by 2*len(cols) and silently clipped the
 // last column entirely (found by actually screenshotting the TUI: the
 // Status column's header showed but every row's value was gone).
@@ -1132,12 +1117,6 @@ func columnsWidth(cols []table.Column) int {
 // then Next; ID and Status are the two things the dashboard exists to
 // answer ("which job, and is it broken?"), so Status survives down to the
 // last drop and ID never leaves at all.
-// statusColorWidth is the width a status column needs before its value can
-// carry color: the longest status ("skipped_overlap", 15) plus the 9
-// characters of escape sequence that go-runewidth counts as visible. See
-// colorCell for why the escapes have to be paid for in column width.
-const statusColorWidth = 15 + 9
-
 func jobsColumns(width int) []table.Column {
 	return fitColumns(width, jobsSpecs)
 }
@@ -1152,7 +1131,7 @@ var jobsSpecs = []colSpec{
 	{title: "Runs", min: 4, max: 5, grow: 0, drop: 4},
 	{title: "Cron", min: 12, max: 16, grow: 0, drop: 5},
 	{title: "Next", min: 11, max: 11, grow: 0, drop: 2},
-	{title: "Status", min: 6, max: statusColorWidth, grow: 2, drop: 1},
+	{title: "Status", min: 9, max: statusMaxWidth, grow: 1, drop: 1},
 }
 
 // runsColumns fits the runs table the same way: Status is the column the
@@ -1167,7 +1146,7 @@ func runsColumns(width int) []table.Column {
 // "schedu…" is worse than no Trigger column at all — the whole point of
 // dropping columns is to stop showing stumps.
 var runsSpecs = []colSpec{
-	{title: "Status", min: 6, max: statusColorWidth, grow: 2, drop: 0},
+	{title: "Status", min: 9, max: statusMaxWidth, grow: 1, drop: 0},
 	{title: "Trigger", min: 9, max: 9, grow: 0, drop: 3},
 	{title: "Started", min: 11, max: 11, grow: 0, drop: 1},
 	{title: "Dur", min: 9, max: 10, grow: 1, drop: 2},
@@ -1177,7 +1156,7 @@ var runsSpecs = []colSpec{
 // naturalBoxWidth is the box width at which every column in specs can have
 // its max — beyond this the table gains nothing from extra columns.
 func naturalBoxWidth(specs []colSpec) int {
-	w := boxChromeX
+	w := boxChromeX + gridGutter
 	for _, s := range specs {
 		want := s.max
 		if want == 0 {
@@ -1189,8 +1168,7 @@ func naturalBoxWidth(specs []colSpec) int {
 }
 
 // columnWidth returns the rendered width of the named column, or 0 if the
-// current layout dropped it. Row rendering needs this to decide whether a
-// cell has room to carry color (see colorCell).
+// current layout dropped it.
 func columnWidth(cols []table.Column, title string) int {
 	for _, c := range cols {
 		if c.Title == title {
@@ -1200,27 +1178,7 @@ func columnWidth(cols []table.Column, title string) int {
 	return 0
 }
 
-// colorCell colors a table cell, but only when the column is wide enough to
-// carry the escape sequences as well as the text.
-//
-// bubbles/table v1.0.0 truncates every cell with go-runewidth, which is not
-// ANSI-aware: it measures "\x1b[31mfailed\x1b[0m" as 13 columns rather than
-// the 6 a terminal shows. Measured against the real widget rather than
-// assumed — at a column width below that 13 it cuts mid-escape, which both
-// mangles the text ("failed" -> "f…") and swallows the reset, bleeding the
-// color across the rest of the row; at width >= 13 the string passes
-// through untouched and the row's visible width still comes out exactly
-// right. So the rule is simply: color it when it fits, leave it plain when
-// it doesn't. Narrow terminals lose the color, never the text.
-func colorCell(text string, style lipgloss.Style, width int) string {
-	colored := style.Render(text)
-	if runewidth.StringWidth(colored) <= width {
-		return colored
-	}
-	return text
-}
-
-// setFocus moves focus between panes, keeping bubbles/table's own focus flag
+// setFocus moves focus between panes, keeping each table's own focus flag
 // in step with it.
 //
 // That second part is a bug fix, not bookkeeping: table.Update returns
@@ -1230,9 +1188,8 @@ func colorCell(text string, style lipgloss.Style, width int) string {
 // advertised "↑↓ move" — and the pane was navigable by mouse alone, because
 // the wheel and click paths call MoveUp/MoveDown/SetCursor directly and never
 // go through table.Update. Found by a benchmark-adjacent test that tried to
-// move the runs cursor with the keyboard and couldn't. Focus doesn't affect
-// how bubbles/table draws a selected row (renderRow keys the Selected style
-// off the cursor alone), so nothing about the frame changes.
+// move the runs cursor with the keyboard and couldn't. Focus also picks
+// which selection fill a table draws, so only one cursor reads as live.
 func (m *model) setFocus(p focusPane) {
 	m.focus = p
 	m.jobsTable.Blur()
@@ -1247,9 +1204,20 @@ func (m *model) setFocus(p focusPane) {
 
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.selection = textSelection{}
+	if m.showHelp {
+		// Any key closes the key list; the quit keys still quit.
+		if s := msg.String(); s == "q" || s == "ctrl+c" {
+			return m, tea.Quit
+		}
+		m.showHelp = false
+		return m, nil
+	}
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
+	case "?":
+		m.showHelp = true
+		return m, nil
 	case "esc", "h", "left":
 		if m.focus > focusJobs {
 			m.setFocus(m.focus - 1)
@@ -1351,6 +1319,12 @@ func (m model) paneAt(x, y int) (pane focusPane, paneTop int) {
 // handleMouse maps a click/wheel event to a pane and, for a left-click, to
 // a row within that pane's table.
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.showHelp {
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			m.showHelp = false
+		}
+		return m, nil
+	}
 	return m.selectWithMouse(msg)
 }
 
@@ -1378,6 +1352,7 @@ func (m model) clickAt(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 	switch pane {
 	case focusJobs:
+		row += m.jobsTable.Offset()
 		if row >= len(m.jobs) {
 			return m, nil
 		}
@@ -1387,6 +1362,7 @@ func (m model) clickAt(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, m.reloadRuns(newID)
 		}
 	case focusRuns:
+		row += m.runsTable.Offset()
 		if row >= m.runRowCount() {
 			return m, nil
 		}
@@ -1448,9 +1424,8 @@ func (m model) scroll(pane focusPane, dir int) (tea.Model, tea.Cmd) {
 // the title in the border, row 0 is the border, row 1 the header, row 2 the
 // first job.
 //
-// Doesn't compensate for a table scrolled past its first screenful
-// (bubbles/table exposes no scroll-offset getter) — a non-issue at this
-// tool's job/run-history scale.
+// The caller adds the table's scroll offset: a click on the first visible
+// row of a scrolled table is not row 0.
 func rowAtY(y int) (int, bool) {
 	const chrome = 2
 	row := y - chrome
@@ -1609,11 +1584,15 @@ func newRunID() string {
 // jobRows builds the jobs table's rows to match the columns the current
 // layout actually kept.
 //
-// A row must have exactly one cell per column: bubbles/table's renderRow
-// walks the row's cells and indexes m.cols by the same position, so a row
-// carrying a cell for a dropped column panics with an index-out-of-range
-// rather than ignoring the extra. Building rows from the column set makes
-// that impossible to get wrong.
+// A row must have exactly one cell per column: the table walks the row's
+// cells and the column set by the same position, so building rows from the
+// column set makes the two impossible to get out of step.
+//
+// A disabled job is drawn faint from end to end, with "disabled" where its
+// next fire time would be — the word carries it where color can't. (Each
+// row used to lead with ● or ○ for this, but with every job enabled that
+// was the same glyph on every row, and it spent two columns of the job's
+// name to say nothing.)
 func jobRows(jobs []store.JobSummary, cols []table.Column) []table.Row {
 	rows := make([]table.Row, 0, len(jobs))
 	for _, j := range jobs {
@@ -1621,26 +1600,29 @@ func jobRows(jobs []store.JobSummary, cols []table.Column) []table.Row {
 		if status == "" {
 			status = "never run"
 		}
-		mark := "○"
-		if j.Enabled {
-			mark = "●"
-		}
 		rows = append(rows, cellsFor(cols, func(title string, width int) string {
+			var v string
 			switch title {
 			case "ID":
-				return mark + " " + j.ID
+				v = j.ID
 			case "Kind":
-				return j.Kind
+				v = j.Kind
 			case "Runs":
-				return fmt.Sprint(j.RunCount)
+				v = fmt.Sprint(j.RunCount)
 			case "Cron":
-				return j.Cron
+				v = j.Cron
 			case "Next":
-				return nextRunLabel(j)
+				v = nextRunLabel(j)
 			case "Status":
-				return colorCell(statusLabel(status, width), statusStyle(status), width)
+				if !j.Enabled {
+					return faintStyle.Render(statusLabel(status, width))
+				}
+				return statusCell(status, width)
 			}
-			return ""
+			if !j.Enabled {
+				return faintStyle.Render(v)
+			}
+			return v
 		}))
 	}
 	return rows
@@ -1658,7 +1640,7 @@ func cellsFor(cols []table.Column, value func(title string, width int) string) t
 
 func nextRunLabel(j store.JobSummary) string {
 	if !j.Enabled {
-		return "-"
+		return "disabled"
 	}
 	lastFire := j.CreatedAt
 	if j.LastRunAt.Valid {
@@ -1671,13 +1653,16 @@ func nextRunLabel(j store.JobSummary) string {
 	return next.Local().Format("01-02 15:04")
 }
 
+// runRows builds the runs table's rows. Exit is shown only when it says
+// something: a 0 beside every "✓ ok" was the same fact twice, so the column
+// now holds just the codes worth reading.
 func runRows(runs []store.Run, cols []table.Column) []table.Row {
 	rows := make([]table.Row, 0, len(runs))
 	for _, r := range runs {
 		rows = append(rows, cellsFor(cols, func(title string, width int) string {
 			switch title {
 			case "Status":
-				return colorCell(statusLabel(r.Status, width), statusStyle(r.Status), width)
+				return statusCell(r.Status, width)
 			case "Trigger":
 				return r.Trigger
 			case "Started":
@@ -1685,10 +1670,10 @@ func runRows(runs []store.Run, cols []table.Column) []table.Row {
 			case "Dur":
 				return runDuration(r)
 			case "Exit":
-				if !r.ExitCode.Valid {
-					return "-"
+				if !r.ExitCode.Valid || r.ExitCode.Int64 == 0 {
+					return ""
 				}
-				return fmt.Sprint(r.ExitCode.Int64)
+				return statusFailed.Render(fmt.Sprint(r.ExitCode.Int64))
 			}
 			return ""
 		}))
@@ -1700,39 +1685,76 @@ func runRows(runs []store.Run, cols []table.Column) []table.Row {
 // duration_ms when present; falls back to the timestamp difference only
 // for runs recorded before that field existed — see store's
 // additiveMigrations comment for why the two aren't interchangeable).
+// A run still going shows how long it has been going, so a stuck one is
+// visible as a number that keeps climbing rather than a dash.
 func runDuration(r store.Run) string {
-	if r.DurationMs.Valid {
-		return time.Duration(r.DurationMs.Int64 * int64(time.Millisecond)).Round(time.Millisecond).String()
+	// Checked first: a run in progress already carries a duration_ms of 0.
+	switch {
+	case r.Status == "running":
+		// Whole seconds: the column ticks once a second, and "0ms" or "3.0s"
+		// would claim a precision a live counter doesn't have.
+		d := time.Since(r.StartedAt)
+		if d < time.Minute {
+			return fmt.Sprintf("%ds", int(d.Seconds()))
+		}
+		return humanDuration(d.Truncate(time.Second))
+	case r.DurationMs.Valid:
+		return humanDuration(time.Duration(r.DurationMs.Int64) * time.Millisecond)
+	case r.FinishedAt.Valid:
+		return humanDuration(r.FinishedAt.Time.Sub(r.StartedAt))
 	}
-	if !r.FinishedAt.Valid {
-		return "-"
-	}
-	return r.FinishedAt.Time.Sub(r.StartedAt).Round(time.Second).String()
+	return "-"
 }
 
-// statusLabel shortens a status to fit a narrow column rather than letting
-// the table chop it into a stump. At 30 columns "failed" came out as "fa…"
-// — no shorter to read than "fail" and considerably less clear — and
-// "never run" as "ne…". Real words, just shorter ones.
-func statusLabel(s string, width int) string {
-	if width <= 0 || lipgloss.Width(s) <= width {
-		return s
-	}
+// statusMaxWidth is the widest status cell: a folded stack of skips,
+// "+ skipped ×9".
+const statusMaxWidth = 12
+
+// statusGlyph is the shape half of a status: every status is a glyph, a word
+// and a color, so it still reads with any one of the three missing — the
+// word in a column too narrow for it, the color under NO_COLOR or in a
+// faint disabled row. Glyphs are from the single-width set that every
+// terminal font draws at one cell.
+func statusGlyph(s string) string {
 	switch s {
-	case "failed":
-		return "fail"
-	case "timeout":
-		return "time"
+	case "ok":
+		return "✓"
+	case "failed", "timeout":
+		return "✗"
 	case "running":
-		return "run"
-	case "never run":
-		return "never"
-	case "skipped_overlap":
-		return "skip"
-	case "skipped":
-		return "skip"
+		return "●"
+	default: // never run, skipped, skipped_overlap: nothing ran
+		return "·"
 	}
-	return s
+}
+
+// statusCell is a status as the tables show it: glyph and word, colored.
+func statusCell(s string, width int) string {
+	return statusStyle(s).Render(statusLabel(s, width))
+}
+
+// statusLabel is the glyph and the word, the word shortened to fit a narrow
+// column rather than letting the table chop it into a stump ("fa…" is no
+// shorter to read than "fail" and considerably less clear), and dropped
+// altogether when even that won't fit: the glyph alone still says it.
+func statusLabel(s string, width int) string {
+	g := statusGlyph(s)
+	word := s
+	switch s {
+	case "skipped_overlap":
+		word = "overlap"
+	}
+	if width <= 0 || lipgloss.Width(g+" "+word) <= width {
+		return g + " " + word
+	}
+	short := map[string]string{
+		"failed": "fail", "timeout": "time", "running": "run", "never run": "never",
+		"skipped": "skip", "skipped_overlap": "skip",
+	}[s]
+	if short != "" && lipgloss.Width(g+" "+short) <= width {
+		return g + " " + short
+	}
+	return g
 }
 
 func statusStyle(s string) lipgloss.Style {
@@ -1754,7 +1776,50 @@ func (m model) View() string {
 	if m.selection.active {
 		return m.selection.render()
 	}
+	if m.width > 0 && (m.width < minWidth || m.height < minHeight) {
+		return tooSmallView(m.width, m.height)
+	}
+	if m.showHelp && m.width > 0 {
+		return m.helpView()
+	}
 	return m.dashboardView()
+}
+
+// minWidth and minHeight are the smallest terminal the single-pane layout
+// can draw without clipping: a framed table with its header, three rows,
+// and an ID and a status column that still read as themselves. Below them
+// the frame used to be cut off at the top — at 20x5 the title and the
+// column headers were simply gone — with nothing saying why.
+const (
+	minWidth  = 28
+	minHeight = 7
+)
+
+// tooSmallView replaces the dashboard when the terminal is under the
+// minimum: what is short, by how much, and how to leave. Everything is said
+// in words as well as color.
+func tooSmallView(w, h int) string {
+	dim := func(label string, have, need int) string {
+		mark, st := "✓", statusOK
+		if have < need {
+			mark, st = "✗", statusFailed
+		}
+		return st.Render(fmt.Sprintf("%s %s %d", mark, label, have)) +
+			helpStyle.Render(fmt.Sprintf(", needs %d", need))
+	}
+	lines := []string{
+		helpKeyStyle.Render("Terminal too small"),
+		dim("width", w, minWidth),
+		dim("height", h, minHeight),
+		helpKeyStyle.Render("q") + helpStyle.Render(" quit"),
+	}
+	if len(lines) > h {
+		lines = lines[1:min(len(lines), 1+h)] // the numbers beat the heading
+	}
+	for i, l := range lines {
+		lines[i] = truncateToWidth(l, w)
+	}
+	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, strings.Join(lines, "\n"))
 }
 
 func (m model) dashboardView() string {
@@ -1790,15 +1855,36 @@ func (m model) dashboardView() string {
 			m.logPane(m.height-1-m.topBoxHeight))
 	}
 
-	canFold := len(m.logView.stops) > 0
-	hints := hintsFor(m.focus, m.canResumeSelection(), canFold)
-	if m.focus == focusRuns && m.selectedRunEntry().group {
-		hints = hintsFor(m.focus, false, false)
-		hints[1] = helpHint{key: "enter", long: "fold skips", short: "fold", drop: 2}
-		hints = append(hints, helpHint{key: "→", long: "latest log", short: "log", drop: 4})
+	return body + "\n" + renderHints(m.width, m.footerStatus(), m.hints())
+}
+
+// footerStatus is the message shown between the key hints: a dashboard
+// error if there is one — a reload that failed used to be stored and never
+// shown, leaving a stale screen that looked live — otherwise the last
+// action's outcome.
+func (m model) footerStatus() string {
+	if m.err != nil {
+		return statusFailed.Render("✗ " + m.err.Error())
 	}
-	hints = append(hints, helpHint{key: "drag", long: "select & copy", short: "copy", drop: 5})
-	return body + "\n" + renderHints(m.width, m.statusMsg, hints)
+	if m.statusMsg == "" {
+		return ""
+	}
+	return helpStyle.Render(m.statusMsg)
+}
+
+// hints is the footer for the current pane and selection.
+func (m model) hints() []helpHint {
+	hints := hintsFor(m.focus, m.canResumeSelection(), len(m.logView.stops) > 0)
+	if m.focus == focusRuns && m.selectedRunEntry().group {
+		hints = []helpHint{
+			{key: "↑↓", long: "move", short: "move", drop: 6},
+			{key: "enter", long: "fold skips", short: "fold", drop: 2},
+			{key: "→", long: "latest log", short: "log", drop: 4},
+			{key: "esc", long: "back", short: "back", drop: 3},
+		}
+		hints = append(hints, globalHints...)
+	}
+	return append(hints, helpHint{key: "drag", long: "select & copy", short: "copy", drop: 9})
 }
 
 func (m model) jobsPane(boxHeight int) string {
@@ -1808,14 +1894,14 @@ func (m model) jobsPane(boxHeight int) string {
 			styleMessage(noJobsMessage(m.jobsBoxWidth-boxChromeX, boxHeight-boxChromeY)),
 			m.jobsBoxWidth, boxHeight)
 	}
-	return renderPane(m.paneTitle("Jobs", m.jobsTable.Cursor(), len(m.jobs)),
+	return renderPane(m.paneTitle("Jobs"), position(m.jobsTable.Cursor(), len(m.jobs)),
 		accentJobs, m.focus == focusJobs, content)
 }
 
 func (m model) runsPane(boxHeight int) string {
 	title := "Runs"
 	if id := m.selectedJobID(); id != "" {
-		title = "Runs: " + id
+		title = "Runs · " + id
 	}
 	content := m.runsTable.View()
 	if len(m.runs) == 0 {
@@ -1828,20 +1914,40 @@ func (m model) runsPane(boxHeight int) string {
 		}
 		content = m.emptyBody(styleMessage(msg), m.runsBoxWidth, boxHeight)
 	}
-	return renderPane(m.paneTitle(title, m.runsTable.Cursor(), m.runRowCount()),
+	return renderPane(m.paneTitle(title), position(m.runsTable.Cursor(), m.runRowCount()),
 		accentRuns, m.focus == focusRuns, content)
 }
 
 func (m model) logPane(boxHeight int) string {
-	title := m.logPaneTitle()
+	// The run id goes first when the border is short of room: it is the
+	// least readable part, and keeping it used to push everything after it —
+	// including the scroll position — off the end of the rule.
+	head, id := m.logTitleParts()
+	title := m.paneTitle(head)
+	if id != "" {
+		if full := m.paneTitle(head + " · " + id); titleFits(full, m.width) {
+			title = full
+		}
+	}
 	// The tables say where you are via "3/21"; the log needs its own
 	// version of that, or a long transcript gives no clue that there's
 	// more above or below the visible slice. Only shown when it's
 	// actually scrollable.
+	pos := ""
 	if m.logVP.TotalLineCount() > m.logVP.Height {
-		title = fmt.Sprintf("%s %d%%", title, int(m.logVP.ScrollPercent()*100))
+		pos = fmt.Sprintf("%d%%", int(m.logVP.ScrollPercent()*100))
 	}
-	return renderPane(title, accentLog, m.focus == focusLog, m.logVP.View())
+	return renderPane(title, pos, accentLog, m.focus == focusLog, m.logVP.View())
+}
+
+// position is a list pane's "where am I" label, drawn in its bottom border:
+// "Jobs 3/21" is the difference between a list that happens to show six
+// rows and a list that has fifteen more you can't see.
+func position(cursor, total int) string {
+	if total == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d/%d", cursor+1, total)
 }
 
 // logPaneTitle identifies whose output the log pane shows. Run IDs alone
@@ -1851,22 +1957,30 @@ func (m model) logPane(boxHeight int) string {
 // local start time, mirroring the Runs pane columns, so the pane answers
 // "what am I looking at" on its own.
 func (m model) logPaneTitle() string {
-	run := m.selectedRunWithMeta()
-	label := "Log"
-	if run != nil {
-		name := run.JobID
-		if job := m.jobByID(run.JobID); job != nil {
-			name = job.ID
-		}
-		label = fmt.Sprintf("Log %s · %s · %s", name,
-			run.StartedAt.Local().Format("01-02 15:04:05"), run.ID)
-		if e := m.selectedRunEntry(); e.group {
-			label = fmt.Sprintf("Log %s · %d skips %s–%s · latest: %s", name, e.end-e.first,
-				m.runs[e.end-1].StartedAt.Local().Format("01-02 15:04"),
-				run.StartedAt.Local().Format("01-02 15:04"), run.ID)
-		}
+	head, id := m.logTitleParts()
+	if id == "" {
+		return head
 	}
-	return m.paneTitle(label, 0, 0)
+	return head + " · " + id
+}
+
+// logTitleParts splits the log title into the part that must survive a
+// narrow border and the run id, which may be dropped.
+func (m model) logTitleParts() (head, id string) {
+	run := m.selectedRunWithMeta()
+	if run == nil {
+		return "Log", ""
+	}
+	name := run.JobID
+	if job := m.jobByID(run.JobID); job != nil {
+		name = job.ID
+	}
+	if e := m.selectedRunEntry(); e.group {
+		return fmt.Sprintf("Log · %s · %d skips %s–%s", name, e.end-e.first,
+			m.runs[e.end-1].StartedAt.Local().Format("01-02 15:04"),
+			run.StartedAt.Local().Format("01-02 15:04")), "latest: " + run.ID
+	}
+	return fmt.Sprintf("Log · %s · %s", name, run.StartedAt.Local().Format("01-02 15:04:05")), run.ID
 }
 
 func (m model) selectedRunWithMeta() *store.Run {
@@ -1892,21 +2006,21 @@ func (m model) jobByID(id string) *store.JobSummary {
 	return nil
 }
 
-// paneTitle labels a pane and, for the list panes, says where you are in
-// it: "Jobs 3/21" is the difference between a list that happens to show six
-// rows and a list that has fifteen more you can't see. Nothing in the old
-// UI hinted that rows existed past the bottom of the box.
-//
-// In the single-pane layout the title also carries a back-arrow, since the
-// pane you came from is no longer on screen to imply it.
-func (m model) paneTitle(label string, cursor, total int) string {
+// paneTitle labels a pane. In the single-pane layout the title also carries
+// a back-arrow, since the pane you came from is no longer on screen to imply
+// it.
+func (m model) paneTitle(label string) string {
 	if m.mode == layoutFocused && m.focus > focusJobs {
 		label = "◂ " + label
 	}
-	if total > 0 {
-		label = fmt.Sprintf("%s %d/%d", label, cursor+1, total)
-	}
 	return label
+}
+
+// titleFits reports whether embedTitle can show title whole in a box of the
+// given outer width: a corner and a rule rune either side, and the label's
+// own two spaces.
+func titleFits(title string, boxWidth int) bool {
+	return lipgloss.Width(title) <= boxWidth-5
 }
 
 // emptyBody fits an empty-state message to the space the pane's table would
@@ -2012,23 +2126,24 @@ func styleMessage(lines []string) []styledLine {
 }
 
 // renderPane draws one pane's box with a rounded, per-pane-accented border
-// (dimmed when unfocused, full accent + bold title when focused — btop
+// (quiet when unfocused, full accent + bold title when focused — btop
 // itself has no focus concept, so this is jobtail's own adaptation to keep
 // the existing focus affordance while adopting btop's per-panel color
-// identity) and its title embedded in the top border rule rather than as
-// a separate content row (see embedTitle).
-func renderPane(title string, accent lipgloss.Color, focused bool, content string) string {
-	borderColor := dimPaneColor
+// identity), its title embedded in the top border rule rather than as a
+// separate content row (see embedTitle), and pos — the pane's scroll or
+// cursor position, if any — at the right end of the bottom rule, where it
+// stays out of the way of the title however long that gets.
+func renderPane(title, pos string, accent lipgloss.Color, focused bool, content string) string {
+	borderColor, labelStyle := borderDefault, lipgloss.NewStyle().Foreground(fgMuted)
 	if focused {
-		borderColor = accent
+		borderColor, labelStyle = accent, lipgloss.NewStyle().Foreground(accent).Bold(true)
 	}
 	box := roundedPane.BorderForeground(borderColor).Render(content)
-
-	labelStyle := lipgloss.NewStyle().Foreground(borderColor)
-	if focused {
-		labelStyle = labelStyle.Bold(true)
+	box = embedTitle(box, title, labelStyle)
+	if pos != "" {
+		box = embedPosition(box, pos, lipgloss.NewStyle().Foreground(fgMuted))
 	}
-	return embedTitle(box, title, labelStyle)
+	return box
 }
 
 // borderLineRE matches a top border line lipgloss rendered with a single
@@ -2093,16 +2208,53 @@ func embedTitle(box, title string, labelStyle lipgloss.Style) string {
 	return newTop + "\n" + lines[1]
 }
 
+// embedPosition splices label into the right end of a box's bottom border,
+// the same way embedTitle does the top one. It leaves the box alone when
+// the rule is too short to hold it.
+func embedPosition(box, label string, style lipgloss.Style) string {
+	i := strings.LastIndex(box, "\n")
+	if i < 0 {
+		return box
+	}
+	bottom := box[i+1:]
+	prefix, body, suffix := "", bottom, ""
+	if m := borderLineRE.FindStringSubmatch(bottom); m != nil {
+		prefix, body, suffix = m[1], m[2], m[3]
+	}
+	runes := []rune(body)
+	l := []rune(" " + label + " ")
+	end := len(runes) - 2 // keep the corner and one rule rune after it
+	start := end - len(l)
+	if start < 2 {
+		return box
+	}
+	return box[:i+1] + prefix + string(runes[:start]) + style.Render(string(l)) +
+		prefix + string(runes[end:]) + suffix
+}
+
 // helpHint is one key hint, with a shorter label to fall back on and a drop
-// priority (highest goes first when the bar won't fit).
+// priority (highest goes first when the bar won't fit). Global hints — keys
+// that do the same thing everywhere — sit at the right end of the bar, apart
+// from the ones for the pane in hand.
 type helpHint struct {
 	key, long, short string
 	drop             int
+	global           bool
+}
+
+// globalHints close every footer. Quitting — the one thing a user must
+// always be able to discover — never drops, and help goes next to last,
+// since it lists everything the narrower bars had to leave out.
+var globalHints = []helpHint{
+	{key: "?", long: "help", short: "help", drop: 1, global: true},
+	{key: "q", long: "quit", short: "quit", drop: 0, global: true},
 }
 
 // hintsFor returns the hints that actually do something in the pane you're
-// in, in display order; drop order is separate, and quitting — the one
-// thing a user must always be able to discover — never drops.
+// in, in display order; drop order is separate. Each pane's own primary
+// action outlasts the generic ones: in the log, the fold keys used to be
+// the first to go, so at 60 columns the bar still said "drag copy" but no
+// longer said how to open a tool call.
 //
 // The bar used to be a fixed list, which advertised keys that the pane
 // silently ignored: "e enable/disable" and "r run now" only act on the jobs
@@ -2114,25 +2266,21 @@ type helpHint struct {
 // that captured a session id, so a cli job's runs — or an agent run that
 // died before its session id arrived — must not advertise it.
 func hintsFor(focus focusPane, canResume, canFold bool) []helpHint {
-	// Dropped first of the pane's real hints: useful, but the one you can
-	// most afford to lose on a narrow terminal.
-	resumeHint := helpHint{key: "r", long: "resume session", short: "resume", drop: 4}
+	resumeHint := helpHint{key: "r", long: "resume session", short: "resume", drop: 5}
+	var hints []helpHint
 	switch focus {
 	case focusRuns:
-		hints := []helpHint{
-			{key: "↑↓", long: "move", short: "move", drop: 3},
+		hints = []helpHint{
+			{key: "↑↓", long: "move", short: "move", drop: 6},
 			{key: "enter", long: "open log", short: "log", drop: 2},
 		}
 		if canResume {
 			hints = append(hints, resumeHint)
 		}
-		return append(hints,
-			helpHint{key: "esc", long: "back", short: "back", drop: 1},
-			helpHint{key: "q", long: "quit", short: "quit", drop: 0},
-		)
+		hints = append(hints, helpHint{key: "esc", long: "back", short: "back", drop: 3})
 	case focusLog:
-		hints := []helpHint{
-			{key: "↑↓", long: "scroll", short: "scroll", drop: 5},
+		hints = []helpHint{
+			{key: "↑↓", long: "scroll", short: "scroll", drop: 8},
 		}
 		// The fold keys are only advertised when the log on screen actually has
 		// something folded in it: a cli job's output and a short transcript
@@ -2140,27 +2288,24 @@ func hintsFor(focus focusPane, canResume, canFold bool) []helpHint {
 		// a cli run keeps these off too.
 		if canFold {
 			hints = append(hints,
-				helpHint{key: "jk", long: "step", short: "step", drop: 7},
-				helpHint{key: "enter", long: "expand", short: "expand", drop: 6},
-				helpHint{key: "o", long: "expand all", short: "all", drop: 8},
+				helpHint{key: "jk", long: "step", short: "step", drop: 4},
+				helpHint{key: "enter", long: "expand", short: "expand", drop: 2},
+				helpHint{key: "o", long: "expand all", short: "all", drop: 7},
 			)
 		}
 		if canResume {
 			hints = append(hints, resumeHint)
 		}
-		return append(hints,
-			helpHint{key: "esc", long: "back", short: "back", drop: 1},
-			helpHint{key: "q", long: "quit", short: "quit", drop: 0},
-		)
+		hints = append(hints, helpHint{key: "esc", long: "back", short: "back", drop: 3})
 	default:
-		return []helpHint{
-			{key: "↑↓", long: "move", short: "move", drop: 4},
-			{key: "enter", long: "runs", short: "runs", drop: 1},
-			{key: "e", long: "enable/disable", short: "on/off", drop: 3},
-			{key: "r", long: "run now", short: "run", drop: 2},
-			{key: "q", long: "quit", short: "quit", drop: 0},
+		hints = []helpHint{
+			{key: "↑↓", long: "move", short: "move", drop: 6},
+			{key: "enter", long: "runs", short: "runs", drop: 2},
+			{key: "r", long: "run now", short: "run", drop: 3},
+			{key: "e", long: "enable/disable", short: "on/off", drop: 4},
 		}
 	}
+	return append(hints, globalHints...)
 }
 
 // renderHelpBar is the bottom key-hint bar, styled like btop's footer: each
@@ -2172,29 +2317,60 @@ func hintsFor(focus focusPane, canResume, canFold bool) []helpHint {
 // said how to exit), and at 60 it cut mid-word to "e enable/dis". Hints now
 // shorten, then drop whole, worst-priority first.
 func renderHelpBar(width int, focus focusPane, statusMsg string, canResume, canFold bool) string {
+	if statusMsg != "" {
+		statusMsg = helpStyle.Render(statusMsg)
+	}
 	return renderHints(width, statusMsg, hintsFor(focus, canResume, canFold))
 }
 
-func renderHints(width int, statusMsg string, hints []helpHint) string {
-	key := func(k, desc string) string {
-		return helpKeyStyle.Render(k) + helpStyle.Render(" "+desc)
+// renderHints lays the pane's hints out from the left and the global ones
+// against the right edge, with status (already styled) between them when
+// there is room for it; the key hints matter more than the message.
+func renderHints(width int, status string, hints []helpHint) string {
+	key := func(h helpHint, short bool) string {
+		label := h.long
+		if short {
+			label = h.short
+		}
+		return helpKeyStyle.Render(h.key) + helpStyle.Render(" "+label)
 	}
 	sep := helpStyle.Render("  ·  ")
 	sepShort := helpStyle.Render(" · ")
 
-	build := func(keep []bool, short bool, s string) string {
-		parts := make([]string, 0, len(hints))
+	build := func(keep []bool, short bool, s string) (left, right string) {
+		var l, r []string
 		for i, h := range hints {
 			if !keep[i] {
 				continue
 			}
-			label := h.long
-			if short {
-				label = h.short
+			if h.global {
+				r = append(r, key(h, short))
+			} else {
+				l = append(l, key(h, short))
 			}
-			parts = append(parts, key(h.key, label))
 		}
-		return strings.Join(parts, s)
+		return strings.Join(l, s), strings.Join(r, s)
+	}
+	layout := func(left, right string) (string, bool) {
+		wl, wr := lipgloss.Width(left), lipgloss.Width(right)
+		gap := 0
+		if wl > 0 && wr > 0 {
+			gap = 3
+		}
+		if wl+gap+wr > width {
+			return "", false
+		}
+		if status != "" {
+			lead := "   "
+			if wl == 0 {
+				lead = ""
+			}
+			if wl+len(lead)+lipgloss.Width(status)+gap+wr <= width {
+				left += lead + status
+				wl = lipgloss.Width(left)
+			}
+		}
+		return left + strings.Repeat(" ", width-wl-wr) + right, true
 	}
 
 	keep := make([]bool, len(hints))
@@ -2207,8 +2383,8 @@ func renderHints(width int, statusMsg string, hints []helpHint) string {
 			short bool
 			s     string
 		}{{false, sep}, {true, sep}, {true, sepShort}} {
-			if bar := build(keep, attempt.short, attempt.s); lipgloss.Width(bar) <= width {
-				return withStatus(bar, statusMsg, width)
+			if bar, ok := layout(build(keep, attempt.short, attempt.s)); ok {
+				return bar
 			}
 		}
 		worst, worstDrop := -1, 0
@@ -2220,23 +2396,77 @@ func renderHints(width int, statusMsg string, hints []helpHint) string {
 		if worst < 0 {
 			// Only the never-drop hint is left and it still doesn't fit;
 			// a terminal this narrow gets whatever of it will show.
-			return truncateToWidth(build(keep, true, sepShort), width)
+			l, r := build(keep, true, sepShort)
+			return truncateToWidth(l+r, width)
 		}
 		keep[worst] = false
 	}
 }
 
-// withStatus appends the transient status message only if there's room for
-// it; the key hints matter more than the message.
-func withStatus(bar, statusMsg string, width int) string {
-	if statusMsg == "" {
-		return bar
+// helpView is the full key list, opened with ?. The footer has to drop
+// hints to fit a narrow terminal; this is where the dropped ones still are.
+// Two columns when the terminal has the width, one when it doesn't.
+func (m model) helpView() string {
+	type entry struct{ keys, what string }
+	type section struct {
+		title  string
+		accent lipgloss.Color
+		rows   []entry
 	}
-	full := bar + helpStyle.Render("   "+statusMsg)
-	if lipgloss.Width(full) <= width {
-		return full
+	jobs := section{"Jobs", accentJobs, []entry{
+		{"↑↓ jk", "move"}, {"enter l", "open runs"}, {"r", "run now"}, {"e", "enable / disable"},
+	}}
+	runs := section{"Runs", accentRuns, []entry{
+		{"↑↓ jk", "move"}, {"enter l", "open log"}, {"enter", "fold a stack of skips"},
+		{"r", "resume agent session"}, {"esc h", "back to jobs"},
+	}}
+	logs := section{"Log", accentLog, []entry{
+		{"↑↓", "scroll"}, {"pgup pgdn", "page"}, {"j k", "step through tool calls"},
+		{"enter", "expand / collapse step"}, {"o", "expand / collapse all"},
+		{"r", "resume agent session"}, {"esc h", "back to runs"},
+	}}
+	mouse := section{"Mouse", fgMuted, []entry{
+		{"click", "focus pane, pick row"}, {"wheel", "move / scroll"}, {"drag", "select & copy text"},
+	}}
+	anywhere := section{"Anywhere", fgMuted, []entry{{"?", "this help"}, {"q ctrl+c", "quit"}}}
+
+	const keyW, whatW = 9, 23
+	avail := m.height - 1
+	gaps := true
+	render := func(ss ...section) string {
+		var lines []string
+		for i, s := range ss {
+			if i > 0 && gaps {
+				lines = append(lines, "")
+			}
+			lines = append(lines, lipgloss.NewStyle().Foreground(s.accent).Bold(true).Render(s.title))
+			for _, e := range s.rows {
+				lines = append(lines, helpKeyStyle.Render(fmt.Sprintf("%-*s", keyW, e.keys))+" "+e.what)
+			}
+		}
+		return lipgloss.NewStyle().Width(keyW + 1 + whatW).Render(strings.Join(lines, "\n"))
 	}
-	return bar
+
+	var body string
+	if m.width >= 2*(keyW+1+whatW)+4+boxChromeX {
+		body = lipgloss.JoinHorizontal(lipgloss.Top,
+			render(jobs, runs, anywhere), "    ", render(logs, mouse))
+	} else {
+		// One column is tall: lose the blank lines between sections before
+		// losing whole sections off the bottom.
+		body = render(jobs, runs, logs, anywhere, mouse)
+		if lipgloss.Height(body) > avail-boxChromeY {
+			gaps = false
+			body = render(jobs, runs, logs, anywhere, mouse)
+		}
+	}
+	body = lipgloss.NewStyle().MaxWidth(m.width - boxChromeX).MaxHeight(avail - boxChromeY).Render(body)
+	box := renderPane("Keys", "", accentJobs, true, body)
+	footer := renderHints(m.width, "", []helpHint{
+		{key: "any key", long: "close", short: "close", drop: 1},
+		{key: "q", long: "quit", short: "quit", drop: 0, global: true},
+	})
+	return lipgloss.Place(m.width, avail, lipgloss.Center, lipgloss.Center, box) + "\n" + footer
 }
 
 // renderLog is the plain-text rendering of a run's captured output: agent

@@ -3,6 +3,9 @@
 #   ./scripts/demo/setup.sh          # builds jobtail, seeds /tmp/jobtail-demo
 #   vhs scripts/demo/demo.tape       # needs vhs + ttyd + ffmpeg on PATH
 #
+# The README's two stills come from screenshot.tape and screenshot-narrow.tape,
+# run the same way.
+#
 # Everything runs against the throwaway data dir setup.sh creates. Two binaries
 # are stood in for: the agent job runs scripts/demo/fake_claude.sh instead of
 # the real `claude`, and `herdr` is scripts/demo/fake_herdr.sh, which must
@@ -49,6 +52,12 @@ Sleep 2s
 # 3. Run the backups job now: it goes green.
 Type "r"
 Sleep 1.8s
+
+# 3b. Every key, including the ones a narrow footer has to leave out.
+Type "?"
+Sleep 2.5s
+Escape
+Sleep 500ms
 
 # 4. A failing job is red at a glance. Drill into its log and back out.
 Down
