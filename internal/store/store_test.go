@@ -175,6 +175,15 @@ func TestStartRunSurvivesConcurrentWriters(t *testing.T) {
 			default:
 			}
 			_ = writer.SetRunChildPID(ctx, "busy", i)
+			// Paced, not a tight loop. Back to back, this writer re-took the
+			// lock the instant it let go, and SQLite's busy handler — which
+			// polls on a backoff rather than queueing waiters — could miss
+			// every gap for the whole busy_timeout: a starved StartRun, and a
+			// flaky failure on slow CI runners that says nothing about
+			// StartRun. A write every millisecond still lands between
+			// StartRun's read and its insert often enough to catch the
+			// deferred-transaction bug this test exists for.
+			time.Sleep(time.Millisecond)
 		}
 	}()
 
