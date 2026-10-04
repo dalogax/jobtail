@@ -162,3 +162,20 @@ func TestLatestTagFromLocationRejectsTraversal(t *testing.T) {
 		t.Fatalf("traversal tag %q should have been rejected", got)
 	}
 }
+
+func TestManagedBy(t *testing.T) {
+	cases := map[string]bool{
+		"/usr/bin/jobtail": true,
+		"/opt/homebrew/Cellar/jobtail/0.5.0/bin/jobtail": true,
+		"/home/linuxbrew/.linuxbrew/bin/jobtail":         true,
+		"/nix/store/abc-jobtail-0.5.0/bin/jobtail":       true,
+		"/home/dani/.local/bin/jobtail":                  false,
+		"/usr/local/bin/jobtail":                         false,
+		"/tmp/go-build123/b001/exe/jobtail":              false,
+	}
+	for path, want := range cases {
+		if _, got := ManagedBy(path); got != want {
+			t.Errorf("ManagedBy(%q) = %v, want %v", path, got, want)
+		}
+	}
+}

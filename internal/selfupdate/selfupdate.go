@@ -229,7 +229,10 @@ func writeState(dataDir string, st checkState) {
 // build with nothing to compare against, or the network is unreachable and
 // nothing is cached yet). It re-hits the network at most once every
 // checkInterval, caching the result in dataDir.
-func CheckForUpdate(ctx context.Context, dataDir, currentVersion string) string {
+//
+// execPath is the running binary; when a package manager owns it (see
+// ManagedBy) the suggestion points there instead of at `jobtail upgrade`.
+func CheckForUpdate(ctx context.Context, dataDir, currentVersion, execPath string) string {
 	if !semver.IsValid(currentVersion) {
 		return "" // "dev" or any non-release build: nothing to compare against
 	}
@@ -246,9 +249,33 @@ func CheckForUpdate(ctx context.Context, dataDir, currentVersion string) string 
 		return ""
 	}
 	if semver.Compare(latest, currentVersion) > 0 {
-		return fmt.Sprintf("a newer jobtail is available: %s -> %s (run `jobtail upgrade`)", currentVersion, latest)
+		how := "run `jobtail upgrade`"
+		if m, ok := ManagedBy(execPath); ok {
+			how = "upgrade it with " + m
+		}
+		return fmt.Sprintf("a newer jobtail is available: %s -> %s (%s)", currentVersion, latest, how)
 	}
 	return ""
+}
+
+// ManagedBy reports whether execPath (already symlink-resolved) is a binary
+// a package manager installed — pacman/AUR into /usr/bin, Homebrew into its
+// Cellar, Nix into its store — and if so, names the tool to upgrade it
+// with. Replacing such a binary in place would either fail on permissions
+// or silently diverge from what the package manager thinks is installed.
+func ManagedBy(execPath string) (string, bool) {
+	switch {
+	case strings.Contains(execPath, "/Cellar/"), strings.HasPrefix(execPath, "/home/linuxbrew/"):
+		return "Homebrew (`brew upgrade jobtail`)", true
+	case strings.HasPrefix(execPath, "/nix/store/"):
+		return "Nix", true
+	}
+	for _, dir := range []string{"/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/"} {
+		if strings.HasPrefix(execPath, dir) {
+			return "your system package manager", true
+		}
+	}
+	return "", false
 }
 
 // Install downloads the release asset for goos/goarch and atomically

@@ -1,0 +1,14 @@
+post_install() {
+  echo ">> Enable the per-user timer that runs due jobs (as your user, not root):"
+  echo ">>   jobtail install-scheduler --enable"
+  echo ">> Optionally teach your coding agents to drive jobtail:"
+  echo ">>   jobtail install-skill"
+  echo ">> Upgrades come through pacman; 'jobtail upgrade' won't work on /usr/bin."
+}
+
+post_upgrade() {
+  echo ">> Refresh the agent skill bundled with this version (as your user):"
+  echo ">>   jobtail install-skill --only-installed"
+  echo ">> If you installed jobtail before at another path, re-run:"
+  echo ">>   jobtail install-scheduler --enable"
+}

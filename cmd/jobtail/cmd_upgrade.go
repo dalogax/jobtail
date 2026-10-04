@@ -35,23 +35,27 @@ func newUpgradeCmd() *cobra.Command {
 				return nil
 			}
 
+			execPath, err := executablePath()
+			if err != nil {
+				return err
+			}
+			manager, managed := selfupdate.ManagedBy(execPath)
+
 			if checkOnly {
 				fmt.Fprintf(cmd.OutOrStdout(), "a newer jobtail is available: %s -> %s\n", displayVersion(cur), rel.TagName)
+				if managed {
+					fmt.Fprintf(cmd.OutOrStdout(), "upgrade it with %s\n", manager)
+				}
 				return nil
+			}
+			if managed {
+				return fmt.Errorf("%s belongs to a package manager, not to jobtail; upgrade it with %s", execPath, manager)
 			}
 
 			asset, ok := selfupdate.CurrentPlatformAsset(rel)
 			if !ok {
 				return fmt.Errorf("release %s has no asset for %s/%s (expected %s)",
 					rel.TagName, runtime.GOOS, runtime.GOARCH, selfupdate.AssetName(runtime.GOOS, runtime.GOARCH))
-			}
-
-			execPath, err := os.Executable()
-			if err != nil {
-				return err
-			}
-			if resolved, err := filepath.EvalSymlinks(execPath); err == nil {
-				execPath = resolved
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "installing jobtail %s (%s)...\n", rel.TagName, asset.Name)
@@ -81,4 +85,17 @@ func displayVersion(v string) string {
 		return "dev"
 	}
 	return v
+}
+
+// executablePath is the running binary with symlinks resolved, so a
+// ~/.local/bin link into a package manager's tree is seen for what it is.
+func executablePath() (string, error) {
+	p, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
+	return p, nil
 }
