@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
@@ -80,11 +79,11 @@ func (m model) groupedRunRows(cols []table.Column) []table.Row {
 					if lipgloss.Width(label) > c.Width {
 						label = fmt.Sprintf("%s ×%d", mark, e.end-e.first)
 					}
-					row[j] = colorCell(label, statusNever, c.Width)
+					row[j] = statusNever.Render(label)
 				case "Dur":
-					row[j] = m.runs[e.first].StartedAt.Sub(m.runs[e.end-1].StartedAt).Round(time.Second).String()
+					row[j] = humanDuration(m.runs[e.first].StartedAt.Sub(m.runs[e.end-1].StartedAt))
 				case "Exit":
-					row[j] = "-"
+					row[j] = ""
 				}
 			}
 		}

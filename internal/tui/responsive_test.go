@@ -98,7 +98,7 @@ func TestJobIDStaysReadable(t *testing.T) {
 func TestHelpBarAlwaysShowsHowToQuit(t *testing.T) {
 	st, logsDir := seedStore(t)
 	for _, size := range []struct{ w, h int }{
-		{172, 40}, {100, 30}, {80, 24}, {60, 20}, {40, 20}, {30, 20}, {24, 12}, {20, 10},
+		{172, 40}, {100, 30}, {80, 24}, {60, 20}, {40, 20}, {30, 20}, {28, 7},
 	} {
 		m := modelAt(t, st, logsDir, size.w, size.h)
 		lines := strings.Split(m.View(), "\n")
@@ -109,6 +109,32 @@ func TestHelpBarAlwaysShowsHowToQuit(t *testing.T) {
 		if w := lipgloss.Width(bar); w > size.w {
 			t.Errorf("at %dx%d the help bar is %d columns wide and would be cropped: %q",
 				size.w, size.h, w, plain(bar))
+		}
+	}
+}
+
+// Below the smallest frame the layout can draw, the dashboard used to clip
+// its own top rows off — title and headers gone, nothing saying why. It now
+// says what is short and how to leave.
+func TestTooSmallTerminalSaysSoAndHowToQuit(t *testing.T) {
+	st, logsDir := seedStore(t)
+	for _, size := range []struct{ w, h int }{{27, 20}, {80, 6}, {24, 12}, {20, 5}} {
+		m := modelAt(t, st, logsDir, size.w, size.h)
+		view := plain(m.View())
+		lines := strings.Split(view, "\n")
+		if len(lines) > size.h {
+			t.Errorf("at %dx%d the too-small screen is %d lines tall", size.w, size.h, len(lines))
+		}
+		for _, l := range lines {
+			if w := lipgloss.Width(l); w > size.w {
+				t.Errorf("at %dx%d a line is %d wide: %q", size.w, size.h, w, l)
+			}
+		}
+		if !strings.Contains(view, "needs") {
+			t.Errorf("at %dx%d it should say what size is needed:\n%s", size.w, size.h, view)
+		}
+		if size.h >= 4 && !strings.Contains(view, "quit") {
+			t.Errorf("at %dx%d it should say how to quit:\n%s", size.w, size.h, view)
 		}
 	}
 }
@@ -231,10 +257,9 @@ func TestEmptyDatabaseTellsYouWhatToDo(t *testing.T) {
 	}
 }
 
-// TestStatusColorNeverCorruptsTheCell is the guard on colorCell. bubbles/
-// table truncates with a non-ANSI-aware width, so a colored cell in a
-// column too narrow for its escape bytes gets cut mid-sequence: the text is
-// mangled and the lost reset bleeds the color across the rest of the row.
+// TestStatusColorNeverCorruptsTheCell: a colored cell cut by a width that
+// isn't ANSI-aware gets cut mid-sequence, mangling the text and letting the
+// lost reset bleed the color across the rest of the row.
 func TestStatusColorNeverCorruptsTheCell(t *testing.T) {
 	st, logsDir := seedStore(t)
 	ctx := context.Background()
@@ -265,10 +290,13 @@ func TestStatusColorNeverCorruptsTheCell(t *testing.T) {
 	}
 }
 
-// TestStatusIsColoredWhenThereIsRoom: the styles existed but nothing ever
-// called statusStyle, so the dashboard's single most important signal —
-// did it fail? — rendered in the same plain text as everything else.
-func TestStatusIsColoredWhenThereIsRoom(t *testing.T) {
+// TestFailedStatusIsColoredAtEveryWidth: bubbles/table measured cells with
+// a width that counted escape bytes, so a colored status only fit in a
+// column ~15 wide. Below that the color was dropped to keep the text — and
+// since "failed" is longer than "ok", at 80 columns the dashboard showed a
+// green "ok" beside a plain "failed": the one status that needed the signal
+// was the one that lost it. Every width now gets glyph, word and color.
+func TestFailedStatusIsColoredAtEveryWidth(t *testing.T) {
 	// Under `go test` there's no TTY, so lipgloss picks the Ascii profile
 	// and renders every style as plain text — which would make this test
 	// pass vacuously. Force a real profile so the escapes actually appear.
@@ -276,19 +304,42 @@ func TestStatusIsColoredWhenThereIsRoom(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.ANSI256)
 	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
 
-	cols := jobsColumns(120)
-	w := columnWidth(cols, "Status")
-	if w == 0 {
-		t.Fatal("a 120-column pane should keep the Status column")
+	st, logsDir := seedStore(t)
+	ctx := context.Background()
+	runID := "fail-run"
+	if _, err := st.StartRun(ctx, "greet", runID, "manual", logsDir+"/"+runID+".log", time.Now()); err != nil {
+		t.Fatal(err)
 	}
-	got := colorCell("failed", statusFailed, w)
-	if !strings.Contains(got, "\x1b[") {
-		t.Errorf("at status width %d the cell should carry color, got %q", w, got)
+	if err := st.FinishRun(ctx, runID, "failed", 1, time.Now(), 10); err != nil {
+		t.Fatal(err)
 	}
-	// And at a width that can't hold the escapes, it must fall back to
-	// plain text rather than emitting something the table will corrupt.
-	if got := colorCell("failed", statusFailed, 6); got != "failed" {
-		t.Errorf("a narrow status column should render plain text, got %q", got)
+	red := statusFailed.Render("✗")
+	red = red[:strings.Index(red, "✗")] // the opening escape alone
+	for _, size := range []struct{ w, h int }{{172, 40}, {120, 30}, {80, 24}, {60, 20}, {46, 20}, {30, 20}} {
+		m := modelAt(t, st, logsDir, size.w, size.h)
+		if view := m.View(); !strings.Contains(view, red+"✗") {
+			t.Errorf("at %dx%d the failed status is not drawn as a red ✗:\n%s", size.w, size.h, plain(view))
+		}
+	}
+}
+
+func TestStatusLabelKeepsGlyphAtAnyWidth(t *testing.T) {
+	for _, tc := range []struct {
+		status string
+		width  int
+		want   string
+	}{
+		{"failed", 20, "✗ failed"},
+		{"failed", 6, "✗ fail"},
+		{"failed", 3, "✗"},
+		{"ok", 4, "✓ ok"},
+		{"never run", 11, "· never run"},
+		{"never run", 8, "· never"},
+		{"skipped_overlap", 20, "· overlap"},
+	} {
+		if got := statusLabel(tc.status, tc.width); got != tc.want {
+			t.Errorf("statusLabel(%q, %d) = %q, want %q", tc.status, tc.width, got, tc.want)
+		}
 	}
 }
 

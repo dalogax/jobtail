@@ -466,14 +466,19 @@ func resultMeta(ev transcriptLine) string {
 	return strings.Join(parts, " · ")
 }
 
+// humanDuration keeps a duration short and comparable down a column: "2ms",
+// "8.9s", "4m05s", "1h12m". time.Duration's own String gave "8.921s" next to
+// "2ms" and "4m5.123s".
 func humanDuration(d time.Duration) string {
 	switch {
 	case d < time.Second:
 		return fmt.Sprintf("%dms", d.Milliseconds())
 	case d < time.Minute:
 		return fmt.Sprintf("%.1fs", d.Seconds())
-	default:
+	case d < time.Hour:
 		return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
+	default:
+		return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
 	}
 }
 

@@ -114,7 +114,7 @@ func TestRefreshSeesARunFinish(t *testing.T) {
 func TestRefreshSeesAJobToggledElsewhere(t *testing.T) {
 	st, logsDir := seedStore(t)
 	m := modelAt(t, st, logsDir, 172, 40)
-	if !strings.Contains(plain(m.View()), "● greet") {
+	if jobLine(m.View(), "greet") == "" || strings.Contains(jobLine(m.View(), "greet"), "disabled") {
 		t.Fatalf("expected greet to start out enabled:\n%s", plain(m.View()))
 	}
 
@@ -125,7 +125,7 @@ func TestRefreshSeesAJobToggledElsewhere(t *testing.T) {
 	for _, msg := range tickMsgs(t, m) {
 		m = send(t, m, msg)
 	}
-	if !strings.Contains(plain(m.View()), "○ greet") {
+	if !strings.Contains(jobLine(m.View(), "greet"), "disabled") {
 		t.Errorf("job was disabled elsewhere but the pane still shows it enabled:\n%s", plain(m.View()))
 	}
 }
