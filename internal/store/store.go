@@ -421,6 +421,42 @@ func (s *Store) DeleteJob(ctx context.Context, id string) ([]string, error) {
 	return logPaths, err
 }
 
+// DeleteFinishedRuns removes every run of a job except those still
+// running, returning the deleted runs' log paths for the caller to remove
+// (as DeleteJob does). A running run is left alone: its runner still has
+// to FinishRun it, and that update would otherwise find no row.
+func (s *Store) DeleteFinishedRuns(ctx context.Context, jobID string) ([]string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `SELECT log_path FROM runs WHERE job_id = ? AND status != 'running'`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	var logPaths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		logPaths = append(logPaths, p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM runs WHERE job_id = ? AND status != 'running'`, jobID); err != nil {
+		return nil, err
+	}
+	return logPaths, tx.Commit()
+}
+
 // EditJob applies a sparse patch: zero-value fields in patch are left unchanged
 // except where the corresponding *Set flag is true.
 type JobPatch struct {

@@ -288,6 +288,15 @@ type model struct {
 	running       map[string]bool // job IDs with an in-flight "run now" from the TUI
 	resuming      map[string]bool // run IDs with a Herdr tab already opening
 
+	// The modals. At most one is open; while it is, it owns every key.
+	form     *jobForm     // n / e on the jobs pane
+	cleanAsk *cleanPrompt // c on the runs pane
+
+	// selectAfterLoad is a job to put the cursor on once the next job list
+	// arrives: the one just created or saved, so the form closes onto it.
+	selectAfterLoad string
+	cwd             string // where the dashboard was opened; a new job starts there
+
 	// Geometry, all set by layout() and read by both View() and mouse
 	// hit-testing — the two must never re-derive it independently, which
 	// is exactly what once put the clickable pane boundaries somewhere
@@ -360,8 +369,10 @@ func newModel(st *store.Store, logsDir string) model {
 	jt := newGrid(jobCols, accentJobs, true)
 	rt := newGrid(runCols, accentRuns, false)
 	vp := viewport.New(20, 10)
+	cwd, _ := os.Getwd()
 
 	return model{
+		cwd:       cwd,
 		ctx:       context.Background(),
 		st:        st,
 		logsDir:   logsDir,
@@ -548,6 +559,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.selection = textSelection{}
 		m.width, m.height = msg.Width, msg.Height
 		m.layout()
+		if m.form != nil {
+			m.form.resize(m.width, m.height)
+		}
 		return m, nil
 
 	case tickMsg:
@@ -576,11 +590,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.err = nil
 		prevID := m.selectedJobID()
+		target := prevID
+		if m.selectAfterLoad != "" {
+			target, m.selectAfterLoad = m.selectAfterLoad, ""
+		}
 		m.jobs = msg.jobs
 		m.jobsTable.SetRows(jobRows(msg.jobs, m.jobsCols))
 		m.layout() // pane heights follow the row count (see topRowHeight)
-		if prevID != "" {
-			m.selectJobByID(prevID)
+		if target != "" {
+			m.selectJobByID(target)
 		} else if len(msg.jobs) > 0 {
 			m.jobsTable.SetCursor(0)
 		}
@@ -621,6 +639,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if runID, path := m.selectedRun(); runID != "" {
 			return m, m.reloadLog(runID, path)
 		}
+		// No run to show, so no log: without this the pane went on showing
+		// the previous job's output under a title that no longer named it.
+		m.clearLog()
 		return m, nil
 
 	case logLoadedMsg:
@@ -653,6 +674,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.statusMsg = fmt.Sprintf("resumed in pane %s", msg.paneID)
 		return m, nil
+	case cleanedMsg:
+		if msg.err != nil {
+			m.statusMsg = fmt.Sprintf("clean failed: %v", msg.err)
+			return m, nil
+		}
+		runs := "runs"
+		if msg.n == 1 {
+			runs = "run"
+		}
+		m.statusMsg = fmt.Sprintf("cleaned %d %s of %s", msg.n, runs, msg.jobID)
+		// Forget what the runs and log panes were showing: the runs are gone,
+		// and the reload must not try to put the cursor back on one of them.
+		m.runs, m.runsJobID = nil, ""
+		m.rebuildRunEntries()
+		m.runsTable.SetCursor(0)
+		m.clearLog()
+		cmds := []tea.Cmd{m.reloadJobs()}
+		if jobID := m.selectedJobID(); jobID != "" {
+			cmds = append(cmds, m.reloadRuns(jobID))
+		}
+		return m, tea.Batch(cmds...)
+
 	case copiedMsg:
 		if msg.err != nil {
 			m.statusMsg = fmt.Sprintf("copy failed: %v", msg.err)
@@ -808,6 +851,14 @@ func (m *model) layout() {
 	if m.logVP.Width != m.logWrapWidth && (m.logText != "" || m.logBlocks != nil) {
 		m.rebuildLogView()
 	}
+}
+
+// clearLog empties the log pane, for when there is no run to show.
+func (m *model) clearLog() {
+	m.logShown = logShown{}
+	m.logText, m.logBlocks, m.logView = "", nil, transcriptView{}
+	m.logCursor = -1
+	m.logVP.SetContent("")
 }
 
 // setLogContent installs a freshly read log: parsed into blocks for an agent
@@ -1204,6 +1255,23 @@ func (m *model) setFocus(p focusPane) {
 
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.selection = textSelection{}
+	if msg.String() == "ctrl+c" {
+		return m, tea.Quit
+	}
+	if m.form != nil {
+		return m.handleFormKey(msg)
+	}
+	if m.cleanAsk != nil {
+		switch msg.String() {
+		case "y":
+			jobID := m.cleanAsk.jobID
+			m.cleanAsk = nil
+			return m, cleanRunsCmd(m.ctx, m.st, jobID)
+		case "n", "esc", "q":
+			m.cleanAsk = nil
+		}
+		return m, nil
+	}
 	if m.showHelp {
 		// Any key closes the key list; the quit keys still quit.
 		if s := msg.String(); s == "q" || s == "ctrl+c" {
@@ -1242,9 +1310,21 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.layout()
 		}
 		return m, nil
+	case "n":
+		if m.focus == focusJobs {
+			return m.newJob(), nil
+		}
 	case "e":
 		if m.focus == focusJobs {
+			return m.editSelectedJob(), nil
+		}
+	case " ":
+		if m.focus == focusJobs {
 			return m.toggleEnabled()
+		}
+	case "c":
+		if m.focus == focusRuns {
+			return m.askClean(), nil
 		}
 	case "r":
 		if m.focus == focusJobs {
@@ -1319,6 +1399,9 @@ func (m model) paneAt(x, y int) (pane focusPane, paneTop int) {
 // handleMouse maps a click/wheel event to a pane and, for a left-click, to
 // a row within that pane's table.
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.form != nil || m.cleanAsk != nil {
+		return m, nil // a modal is answered with keys; the dashboard behind it is inert
+	}
 	if m.showHelp {
 		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
 			m.showHelp = false
@@ -1782,7 +1865,28 @@ func (m model) View() string {
 	if m.showHelp && m.width > 0 {
 		return m.helpView()
 	}
+	if m.width > 0 && m.form != nil {
+		return overlay(m.dashboardView(), m.form.view(m.width, m.height), m.width, m.height)
+	}
+	if m.width > 0 && m.cleanAsk != nil {
+		return overlay(m.dashboardView(), m.cleanAsk.view(m.width), m.width, m.height)
+	}
 	return m.dashboardView()
+}
+
+// handleFormKey hands a key to the open form and acts on what it asks for.
+func (m model) handleFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	res, cmd := m.form.update(msg)
+	switch res {
+	case formClose:
+		m.form = nil
+	case formSave:
+		m = m.saveForm()
+		if m.form == nil {
+			return m, m.reloadJobs()
+		}
+	}
+	return m, cmd
 }
 
 // minWidth and minHeight are the smallest terminal the single-pane layout
@@ -1880,6 +1984,7 @@ func (m model) hints() []helpHint {
 			{key: "↑↓", long: "move", short: "move", drop: 6},
 			{key: "enter", long: "fold skips", short: "fold", drop: 2},
 			{key: "→", long: "latest log", short: "log", drop: 4},
+			{key: "c", long: "clean runs", short: "clean", drop: 7},
 			{key: "esc", long: "back", short: "back", drop: 3},
 		}
 		hints = append(hints, globalHints...)
@@ -2072,9 +2177,8 @@ type styledLine struct {
 // the full version gets the compact one whole.
 func noJobsMessage(width, height int) []string {
 	candidates := [][]string{{
-		"No jobs yet.",
-		"",
-		"Create one from the shell:",
+		"No jobs yet. Press n to create one,",
+		"or from the shell:",
 		"  jobtail add my-check \\",
 		"    --kind cli \\",
 		"    --cron \"*/15 * * * *\" \\",
@@ -2082,12 +2186,13 @@ func noJobsMessage(width, height int) []string {
 		"",
 		"Then press r here to run it now.",
 	}, {
-		"No jobs yet. Create one with",
-		"  jobtail add",
-		"then press r to run it.",
+		"No jobs yet.",
+		"",
+		"Press n to create one,",
+		"then r to run it.",
 	}, {
 		"No jobs yet.",
-		"  jobtail add",
+		"Press n to add one.",
 	}, {
 		"No jobs yet.",
 	}}
@@ -2277,7 +2382,9 @@ func hintsFor(focus focusPane, canResume, canFold bool) []helpHint {
 		if canResume {
 			hints = append(hints, resumeHint)
 		}
-		hints = append(hints, helpHint{key: "esc", long: "back", short: "back", drop: 3})
+		hints = append(hints,
+			helpHint{key: "c", long: "clean runs", short: "clean", drop: 7},
+			helpHint{key: "esc", long: "back", short: "back", drop: 3})
 	case focusLog:
 		hints = []helpHint{
 			{key: "↑↓", long: "scroll", short: "scroll", drop: 8},
@@ -2302,7 +2409,9 @@ func hintsFor(focus focusPane, canResume, canFold bool) []helpHint {
 			{key: "↑↓", long: "move", short: "move", drop: 6},
 			{key: "enter", long: "runs", short: "runs", drop: 2},
 			{key: "r", long: "run now", short: "run", drop: 3},
-			{key: "e", long: "enable/disable", short: "on/off", drop: 4},
+			{key: "n", long: "new", short: "new", drop: 4},
+			{key: "e", long: "edit", short: "edit", drop: 5},
+			{key: "space", long: "on/off", short: "on/off", drop: 7},
 		}
 	}
 	return append(hints, globalHints...)
@@ -2322,6 +2431,10 @@ func renderHelpBar(width int, focus focusPane, statusMsg string, canResume, canF
 	}
 	return renderHints(width, statusMsg, hintsFor(focus, canResume, canFold))
 }
+
+// minorHintDrop is the drop priority from which a hint gives way to a status
+// message: the reminders, not the pane's actions.
+const minorHintDrop = 7
 
 // renderHints lays the pane's hints out from the left and the global ones
 // against the right edge, with status (already styled) between them when
@@ -2377,6 +2490,30 @@ func renderHints(width int, status string, hints []helpHint) string {
 	for i := range keep {
 		keep[i] = true
 	}
+	// An action's outcome ("created job x", "cleaned 12 runs") outranks the
+	// hints that are only reminders — copy by drag, the on/off toggle — so
+	// those step aside for it before it would be the one left out.
+	if status != "" {
+		trial := slices.Clone(keep)
+		for {
+			l, r := build(trial, false, sep)
+			if wl, wr := lipgloss.Width(l), lipgloss.Width(r); wl+3+lipgloss.Width(status)+3+wr <= width {
+				if bar, ok := layout(l, r); ok {
+					return bar
+				}
+			}
+			worst, worstDrop := -1, minorHintDrop-1
+			for i, h := range hints {
+				if trial[i] && h.drop > worstDrop {
+					worst, worstDrop = i, h.drop
+				}
+			}
+			if worst < 0 {
+				break
+			}
+			trial[worst] = false
+		}
+	}
 	// Try progressively smaller renderings, most generous first.
 	for {
 		for _, attempt := range []struct {
@@ -2414,11 +2551,12 @@ func (m model) helpView() string {
 		rows   []entry
 	}
 	jobs := section{"Jobs", accentJobs, []entry{
-		{"↑↓ jk", "move"}, {"enter l", "open runs"}, {"r", "run now"}, {"e", "enable / disable"},
+		{"↑↓ jk", "move"}, {"enter l", "open runs"}, {"r", "run now"},
+		{"n", "new job"}, {"e", "edit job"}, {"space", "enable / disable"},
 	}}
 	runs := section{"Runs", accentRuns, []entry{
 		{"↑↓ jk", "move"}, {"enter l", "open log"}, {"enter", "fold a stack of skips"},
-		{"r", "resume agent session"}, {"esc h", "back to jobs"},
+		{"r", "resume agent session"}, {"c", "clean finished runs"}, {"esc h", "back to jobs"},
 	}}
 	logs := section{"Log", accentLog, []entry{
 		{"↑↓", "scroll"}, {"pgup pgdn", "page"}, {"j k", "step through tool calls"},
@@ -2429,6 +2567,11 @@ func (m model) helpView() string {
 		{"click", "focus pane, pick row"}, {"wheel", "move / scroll"}, {"drag", "select & copy text"},
 	}}
 	anywhere := section{"Anywhere", fgMuted, []entry{{"?", "this help"}, {"q ctrl+c", "quit"}}}
+	form := section{"Job form", accentJobs, []entry{
+		{"↑↓ tab", "move between fields"}, {"enter", "type into a field"},
+		{"←→ space", "choose an option"}, {"esc", "undo the field"},
+		{"s", "save (ctrl+s typing)"}, {"q", "quit the form"},
+	}}
 
 	const keyW, whatW = 9, 23
 	avail := m.height - 1
@@ -2450,14 +2593,14 @@ func (m model) helpView() string {
 	var body string
 	if m.width >= 2*(keyW+1+whatW)+4+boxChromeX {
 		body = lipgloss.JoinHorizontal(lipgloss.Top,
-			render(jobs, runs, anywhere), "    ", render(logs, mouse))
+			render(jobs, runs, anywhere), "    ", render(logs, form, mouse))
 	} else {
 		// One column is tall: lose the blank lines between sections before
 		// losing whole sections off the bottom.
-		body = render(jobs, runs, logs, anywhere, mouse)
+		body = render(jobs, runs, logs, form, anywhere, mouse)
 		if lipgloss.Height(body) > avail-boxChromeY {
 			gaps = false
-			body = render(jobs, runs, logs, anywhere, mouse)
+			body = render(jobs, runs, logs, form, anywhere, mouse)
 		}
 	}
 	body = lipgloss.NewStyle().MaxWidth(m.width - boxChromeX).MaxHeight(avail - boxChromeY).Render(body)

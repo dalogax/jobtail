@@ -12,6 +12,13 @@ jobtail is a scheduler for recurring jobs on the user's own machine. There are t
 
 **The CLI is for you, not the user.** The CLI exists so an agent can manage jobs on the user's behalf. The user sees everything in the dashboard, which they open by running `jobtail` with no arguments. It shows jobs, run history and logs, live. Do the CLI work yourself, then point the user at the dashboard. Don't hand them a list of commands to type.
 
+When the user wants to do something by hand, the dashboard has keys for it, so name the key instead of a command:
+
+- `n` on the jobs pane opens a form to create a job, and `e` opens the selected job in the same form to edit it. The form has every `add` option. `s` saves and `q` leaves.
+- `space` on the jobs pane enables or disables the selected job.
+- `r` runs the selected job now. On a run, `r` resumes that agent session.
+- `c` on the runs pane deletes the selected job's finished runs and their logs, after asking. Runs still in progress are kept. The CLI has no equivalent: `gc` only prunes past `--keep`. If the user wants a job's history cleared, tell them about `c`.
+
 All state lives in one SQLite database. A per-user OS timer runs `jobtail tick` once a minute, and each run that's due gets its own process and log file.
 
 ## 1. Make sure it's installed and actually firing
@@ -139,7 +146,7 @@ jobtail rm <id>                      # deletes the job AND its whole run history
 jobtail gc                           # prunes runs beyond each job's --keep
 ```
 
-A job's `--kind` can't be changed after it's created.
+A job's `--kind` can't be changed after it's created, from the CLI or the dashboard's form.
 
 Deleting a job with `rm` loses its run history for good. Unless the user clearly asked for deletion, prefer `disable`, and confirm with the user before running `rm` on a job you didn't create in this conversation.
 
