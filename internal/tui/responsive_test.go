@@ -139,7 +139,7 @@ func TestTooSmallTerminalSaysSoAndHowToQuit(t *testing.T) {
 	}
 }
 
-// TestHelpBarOnlyAdvertisesKeysThatWork: "e" and "r" act on the jobs table
+// TestHelpBarOnlyAdvertisesKeysThatWork: "n", "e" and "r" act on the jobs table
 // only (handleKey ignores them elsewhere), so offering them while reading a
 // log was a promise the UI didn't keep.
 func TestHelpBarOnlyAdvertisesKeysThatWork(t *testing.T) {
@@ -150,8 +150,9 @@ func TestHelpBarOnlyAdvertisesKeysThatWork(t *testing.T) {
 		lines := strings.Split(m.View(), "\n")
 		return plain(lines[len(lines)-1])
 	}
-	if got := bar(m); !strings.Contains(got, "run now") || !strings.Contains(got, "enable/disable") {
-		t.Fatalf("jobs pane should offer r/e, got %q", got)
+	if got := bar(m); !strings.Contains(got, "run now") || !strings.Contains(got, "n new") ||
+		!strings.Contains(got, "e edit") || !strings.Contains(got, "space on/off") {
+		t.Fatalf("jobs pane should offer r/n/e/space, got %q", got)
 	}
 	m = send(t, m, key('l')) // -> runs
 	m = send(t, m, key('l')) // -> log
@@ -251,8 +252,8 @@ func TestEmptyDatabaseTellsYouWhatToDo(t *testing.T) {
 		if !strings.Contains(view, "No jobs yet") {
 			t.Errorf("at %dx%d an empty database should say so:\n%s", size.w, size.h, view)
 		}
-		if !strings.Contains(view, "jobtail add") {
-			t.Errorf("at %dx%d it should name the command that fixes it:\n%s", size.w, size.h, view)
+		if !strings.Contains(view, "Press n") {
+			t.Errorf("at %dx%d it should name the key that fixes it:\n%s", size.w, size.h, view)
 		}
 	}
 }

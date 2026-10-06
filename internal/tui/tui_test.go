@@ -276,13 +276,13 @@ func TestTUINavigatesJobsToRunsToLog(t *testing.T) {
 		t.Fatalf("want focus back on jobs pane, got %v", m.focus)
 	}
 
-	m = send(t, m, key('e')) // disable
+	m = send(t, m, key(' ')) // disable
 	if !strings.Contains(jobLine(m.View(), "greet"), "disabled") {
-		t.Fatalf("expected greet to read as disabled after 'e':\n%s", m.View())
+		t.Fatalf("expected greet to read as disabled after space:\n%s", m.View())
 	}
-	m = send(t, m, key('e')) // re-enable
+	m = send(t, m, key(' ')) // re-enable
 	if strings.Contains(jobLine(m.View(), "greet"), "disabled") {
-		t.Fatalf("expected greet to read as enabled after 'e' again:\n%s", m.View())
+		t.Fatalf("expected greet to read as enabled after space again:\n%s", m.View())
 	}
 }
 

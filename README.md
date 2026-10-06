@@ -13,9 +13,9 @@
   <img src="https://img.shields.io/badge/deps-one%20static%20binary-informational" alt="one static binary">
 </p>
 
-<p align="center"><img src="docs/demo.gif" alt="jobtail: adding a shell job and an agent job, running one from the dashboard, opening the key list, folding through an agent transcript, and resuming that session" width="900"></p>
+<p align="center"><img src="docs/demo.gif" alt="jobtail: adding an agent job from the shell, creating a shell job in the dashboard's job form, running it, opening the key list, cleaning a failing job's runs, editing the agent job's schedule, folding through its transcript, and resuming that session" width="900"></p>
 
-<p align="center"><sub>Add two jobs → run one now → <code>?</code> for every key → fold through the agent's transcript → pick the session back up. <a href="scripts/demo/demo.tape">How this was recorded.</a></sub></p>
+<p align="center"><sub>Add a job from the shell → <code>n</code> to create one in the dashboard → run it now → <code>?</code> for every key → <code>c</code> to clean a job's runs → <code>e</code> to edit a schedule → fold through the agent's transcript → pick the session back up. <a href="scripts/demo/demo.tape">How this was recorded.</a></sub></p>
 
 ## Install
 
@@ -44,6 +44,24 @@ jobtail add deps-review --kind agent --cron "0 3 * * *" \
 An `agent` job runs one non-interactive turn of [Claude Code](https://claude.com/claude-code), [opencode](https://opencode.ai) or [Codex](https://github.com/openai/codex) — pick with `--provider`, default `claude`. It needs no special environment: a prompt and a working directory, the way a `cli` job needs a command and a working directory.
 
 Then `jobtail` opens the dashboard.
+
+## Add and edit jobs without leaving the dashboard
+
+<p align="center"><img src="docs/screenshot-form.png" alt="the job form open over the dashboard: an agent job's fields — cron with its next fire time, working directory, prompt, provider, timeout, notify — with the cursor on the prompt and its help line below" width="900"></p>
+
+On the jobs pane, **`n`** opens a form for a new job and **`e`** opens the selected one, filled in. It has every option `jobtail add` takes, one field each: kind, cron (with when it next fires), working directory, the command or the prompt, provider, model, permission mode, timeout, precheck, notifications, concurrency and retention. Fields that don't apply to the job's kind stay out of the way.
+
+| key | |
+| --- | --- |
+| `↑` `↓` `tab` | move between fields |
+| `enter` | type into a field; `enter` again to leave it, `esc` to undo it |
+| `←` `→` `space` | pick kind, provider, enabled |
+| `s` | save (`ctrl+s` while typing) |
+| `q` | quit the form — it asks first if you changed anything |
+
+Values are checked the way the CLI checks them — a 4-field cron, a directory that doesn't exist, an unknown notify event — and each problem is shown under its field; nothing is saved until all of them are right. A job's id and kind are fixed once it exists, as with `jobtail edit`. **`space`** pauses or resumes the selected job.
+
+On the runs pane, **`c`** cleans a job's history: it says how many runs it will delete and asks before deleting them and their logs. A run still in progress is kept.
 
 ## Runs that don't finish
 
@@ -185,7 +203,7 @@ Neither needs setup: jobtail looks for `herdr` on `PATH` at the moment it'd be u
 
 ```
 jobtail                      Open the dashboard (same as `jobtail tui`)
-jobtail add <id>             Register a new scheduled job
+jobtail add <id>             Register a new scheduled job (also `n` in the dashboard)
 jobtail list                 List all jobs
 jobtail show <id>            Show one job's detail and recent runs
 jobtail runs <id>            List run history for one job
@@ -193,7 +211,7 @@ jobtail log <run-id>         Dump one run's log to stdout
 jobtail run <id>             Trigger a job now and wait for it to finish
 jobtail resume <run-id>      Reopen an agent run's session (also `r` in the dashboard)
 jobtail enable/disable <id>  Pause or resume a job without deleting it
-jobtail edit <id>            Change one or more fields of an existing job
+jobtail edit <id>            Change one or more fields of an existing job (also `e` in the dashboard)
 jobtail rm <id>              Delete a job and its run history
 jobtail gc                   Prune old runs and logs past retention
 jobtail install-scheduler    Install the per-user timer that runs due jobs

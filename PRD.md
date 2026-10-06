@@ -229,14 +229,16 @@ Jobs and runs side by side on top, log spanning the full width underneath — no
 │ > Bash({"command":"..."})                                                        │
 │ ...                                                                              │
 └────────────────────────────────────────────────────────────────────────────────┘
-  h/l or arrows/enter/esc: move · e enable/disable · r run now · q quit
+  h/l or arrows/enter/esc: move · n new · e edit · space enable/disable · r run now · q quit
 ```
 
 - **Jobs pane** (top-left): `●`/`○` = enabled/disabled, type badge, run count. Status color = last status (green ok / red failed / yellow running / grey never-run) — applied to the status cell, within the width constraint documented in §15.
 - **Runs pane** (top-right): for the selected job, newest first; status glyph, start time, duration, trigger badge (S/M for scheduled/manual).
 - **Log pane** (bottom, full width): for the selected run. `cli` jobs render the raw log as a scrolling text viewport. `agent` jobs parse the `stream-json` lines and render them the way a transcript reads — assistant text, tool calls with their input, tool results collapsed by default (expandable), final result/cost line — not raw JSON by default (raw available via a `J` toggle for debugging).
 - Live tail: if the selected run's `status='running'`, the log pane tails the file (`fsnotify`/poll) instead of a static read.
-- `e`/`r` act on the job/run under the cursor immediately via the same code path as the CLI (no separate "TUI-only" logic to keep in sync).
+- `space`/`r` act on the job/run under the cursor immediately via the same code path as the CLI (no separate "TUI-only" logic to keep in sync).
+- `n`/`e` open a job form in a modal over the dashboard — every `add` flag as a field, `e` prefilled from the selected job — validated with the CLI's rules and saved through the same store calls as `add`/`edit`. `s` saves, `q` quits (asking first if anything changed); while typing into a field those keys are text, so the field is left with `enter`/`esc` and `ctrl+s` saves from inside one.
+- `c` on the runs pane deletes the selected job's finished runs and their logs after a confirmation that names the job and the count; a run still in progress is kept.
 - Refresh: poll SQLite every ~1s for list panes; this is a personal single-writer box, no need for push/subscribe.
 - Mouse: click a job/run row to select it (and switch focus to that pane); click anywhere in a pane to focus it; wheel scrolls whichever pane the cursor is over (job/run cursor moves a row per notch, the log viewport scrolls a line per notch). Keyboard remains the primary/complete interface — mouse is additive, not required.
 

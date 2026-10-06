@@ -36,6 +36,11 @@ var (
 	selectionBG         = lipgloss.Color("237")
 	selectionInactiveBG = lipgloss.Color("235")
 
+	// Form fields: an input's fill, so an empty field is still visible as a
+	// place to type. Between the two selection fills, and never next to
+	// either: the form has no selection rows.
+	fieldBG = lipgloss.Color("236")
+
 	// Status.
 	statusSuccess = lipgloss.Color("2")
 	statusError   = lipgloss.Color("1")

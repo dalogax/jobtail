@@ -208,3 +208,49 @@ func TestStartRunSurvivesConcurrentWriters(t *testing.T) {
 	close(stop)
 	<-writerDone
 }
+
+// TestDeleteFinishedRunsKeepsRunningOnes: cleaning a job's history must not
+// delete a run still in flight — its runner's FinishRun would find no row —
+// nor touch any other job's runs.
+func TestDeleteFinishedRunsKeepsRunningOnes(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(filepath.Join(t.TempDir(), "j.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for _, id := range []string{"a", "b"} {
+		if err := st.CreateJob(ctx, Job{ID: id, Kind: "cli", Cron: "* * * * *", Timezone: "local",
+			Enabled: true, Cwd: "/tmp", Command: "true", MaxConcurrent: 5, Keep: 200}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := time.Now()
+	for i, r := range []struct{ job, id, status string }{
+		{"a", "a1", "ok"}, {"a", "a2", "failed"}, {"a", "a3", "running"}, {"b", "b1", "ok"},
+	} {
+		if _, err := st.StartRun(ctx, r.job, r.id, "manual", "/logs/"+r.id+".log", start.Add(time.Duration(i)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if r.status != "running" {
+			if err := st.FinishRun(ctx, r.id, r.status, 0, time.Now(), 1); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	paths, err := st.DeleteFinishedRuns(ctx, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(paths) != "[/logs/a1.log /logs/a2.log]" && fmt.Sprint(paths) != "[/logs/a2.log /logs/a1.log]" {
+		t.Fatalf("log paths = %v, want a1 and a2", paths)
+	}
+	left, _ := st.ListRuns(ctx, "a", -1)
+	if len(left) != 1 || left[0].ID != "a3" {
+		t.Fatalf("job a runs left = %+v, want only the running a3", left)
+	}
+	if other, _ := st.ListRuns(ctx, "b", -1); len(other) != 1 {
+		t.Fatalf("job b lost runs: %+v", other)
+	}
+}

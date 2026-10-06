@@ -3,8 +3,8 @@
 #   ./scripts/demo/setup.sh          # builds jobtail, seeds /tmp/jobtail-demo
 #   vhs scripts/demo/demo.tape       # needs vhs + ttyd + ffmpeg on PATH
 #
-# The README's two stills come from screenshot.tape and screenshot-narrow.tape,
-# run the same way.
+# The README's three stills come from screenshot.tape, screenshot-form.tape
+# and screenshot-narrow.tape, run the same way.
 #
 # Everything runs against the throwaway data dir setup.sh creates. Two binaries
 # are stood in for: the agent job runs scripts/demo/fake_claude.sh instead of
@@ -31,49 +31,90 @@ Enter
 Sleep 4s
 Show
 
-# 1. Register jobs: a shell command, and a headless agent run.
-Type `jobtail add backups --kind cli --cron "*/15 * * * *" --cwd ~/scripts --cmd ./check_backups.sh`
-Sleep 300ms
-Enter
-Sleep 1s
+# 1. Register a job the way an agent would: one CLI call.
 Type `jobtail add deps-review --kind agent --cron "0 3 * * *" --cwd ~/code/shop \`
 Enter
 Type `  --prompt "Check for outdated deps. Open a PR if safe to update."`
 Sleep 300ms
 Enter
-Sleep 1.5s
+Sleep 1.2s
 
 # 2. Open the dashboard.
 Type "jobtail"
 Sleep 300ms
 Enter
-Sleep 2s
+Sleep 1.5s
 
-# 3. Run the backups job now: it goes green.
+# 3. Or by hand: n opens the job form over the dashboard. enter types into a
+#    field, enter again leaves it, s saves.
+Type "n"
+Sleep 1.2s
+Enter
+Type "backups"
+Enter
+Sleep 300ms
+Down
+Down
+Enter
+Type "*/15 * * * *"
+Enter
+Sleep 300ms
+Down
+Enter
+Ctrl+U
+Type "~/scripts"
+Enter
+Sleep 300ms
+Down
+Enter
+Type "./check_backups.sh"
+Enter
+Sleep 1.2s
+Type "s"
+Sleep 1.2s
+
+# 4. Run it now: it goes green.
 Type "r"
-Sleep 1.8s
+Sleep 1.5s
 
-# 3b. Every key, including the ones a narrow footer has to leave out.
+# 4b. Every key, including the ones a narrow footer has to leave out.
 Type "?"
 Sleep 2.5s
 Escape
 Sleep 500ms
 
-# 4. A failing job is red at a glance. Drill into its log and back out.
+# 5. A failing job is red at a glance. Read why, then clear its history with
+#    c: it asks first, and says what it will delete.
 Down
-Sleep 800ms
-Enter
-Sleep 800ms
-Enter
-Sleep 2s
-Escape
-Sleep 300ms
-Escape
 Sleep 600ms
+Enter
+Sleep 600ms
+Enter
+Sleep 1.8s
+Escape
+Sleep 400ms
+Type "c"
+Sleep 1.8s
+Type "y"
+Sleep 1.2s
+Escape
+Sleep 500ms
 
-# 5. Kick off the agent job and watch its transcript live-tail.
+# 6. e edits a job in the same form, filled in: move the agent job to
+#    weekday mornings.
 Down
-Sleep 700ms
+Sleep 500ms
+Type "e"
+Sleep 1.2s
+Enter
+Ctrl+U
+Type "0 6 * * 1-5"
+Enter
+Sleep 1.5s
+Type "s"
+Sleep 1.2s
+
+# 7. Kick off the agent job and watch its transcript live-tail.
 Type "r"
 Sleep 500ms
 Enter
@@ -81,7 +122,7 @@ Sleep 300ms
 Enter
 Sleep 9s
 
-# 6. The transcript is blocks, not a wall of text: step through the tool calls
+# 8. The transcript is blocks, not a wall of text: step through the tool calls
 #    with j/k, open one with enter, open everything with o.
 Type "k"
 Sleep 1.5s
@@ -98,7 +139,7 @@ Sleep 2.5s
 Type "o"
 Sleep 1.2s
 
-# 7. Pick the session back up where the unattended run left it. `r` here does
+# 9. Pick the session back up where the unattended run left it. `r` here does
 #    the same thing; run from the shell so the handoff is visible in one frame.
 Type "q"
 Sleep 800ms
