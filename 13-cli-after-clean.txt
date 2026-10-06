@@ -1,0 +1,3 @@
+# after
+RUN ID  STATUS  TRIGGER  STARTED  DURATION  EXIT
+log files: 3

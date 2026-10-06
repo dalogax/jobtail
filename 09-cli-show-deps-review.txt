@@ -1,0 +1,15 @@
+id:              deps-review
+kind:            agent
+cron:            0 3 * * * (local)
+enabled:         true
+cwd:             /tmp/jobtail-demo/home/code/shop
+prompt:          Check for outdated deps. Open a PR if safe to update.
+If everything is current, say so in one line.
+provider:        codex
+model:           
+permission-mode: 
+max-concurrent:  1
+timeout:         30m0s (default)
+notify:          failed,timeout (default)
+keep:            200
+recent runs:

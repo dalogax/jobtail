@@ -1,0 +1,5 @@
+ID            KIND   ENABLED  RUNS  NEXT              LAST STATUS
+cert-expiry   cli    true     2     2026-10-07 08:00  failed
+deps-review   agent  false    0     -                 never run
+disk-space    cli    true     3     2026-10-06 13:00  ok
+nightly-sync  cli    true     0     2026-10-07 02:30  never run

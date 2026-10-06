@@ -1,0 +1,5 @@
+# before
+RUN ID                                STATUS  TRIGGER  STARTED                    DURATION  EXIT
+a01d4223-2305-45e0-80f9-6f259eeeafc0  failed  manual   2026-10-06T12:56:01+02:00  2ms       1
+7d0ae897-3fdf-4a4c-a28b-ebcee1c49b99  failed  manual   2026-10-06T12:56:01+02:00  2ms       1
+log files: 5

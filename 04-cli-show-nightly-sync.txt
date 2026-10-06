@@ -1,0 +1,11 @@
+id:              nightly-sync
+kind:            cli
+cron:            30 2 * * * (local)
+enabled:         true
+cwd:             /tmp/jobtail-demo/home/scripts
+cmd:             rsync -a ~/docs /mnt/backup/
+max-concurrent:  1
+timeout:         30m0s (default)
+notify:          failed,timeout (default)
+keep:            200
+recent runs:
