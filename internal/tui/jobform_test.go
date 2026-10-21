@@ -289,13 +289,14 @@ func TestMultilineFieldsExpandToScreenWhileEditing(t *testing.T) {
 			if field.area.Width() < 125 || field.area.Height() < 30 {
 				t.Fatalf("editor should use most of the terminal, got %dx%d", field.area.Width(), field.area.Height())
 			}
+			frameWidth, _ := f.geometry(140, 40)
 			frame := strings.Split(plain(f.view(140, 40)), "\n")
 			if len(frame) != 40 {
 				t.Fatalf("expanded editor height = %d lines, want 40", len(frame))
 			}
 			for i, line := range frame {
-				if got := lipgloss.Width(line); got != 140 {
-					t.Fatalf("expanded editor line %d width = %d, want 140: %q", i, got, line)
+				if got := lipgloss.Width(line); got != frameWidth {
+					t.Fatalf("expanded editor line %d width = %d, want %d: %q", i, got, frameWidth, line)
 				}
 			}
 
