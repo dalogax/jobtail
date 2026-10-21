@@ -1876,6 +1876,7 @@ func (m model) View() string {
 
 // handleFormKey hands a key to the open form and acts on what it asks for.
 func (m model) handleFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	wasEditingMulti := m.form.editingMulti()
 	res, cmd := m.form.update(msg)
 	switch res {
 	case formClose:
@@ -1886,7 +1887,7 @@ func (m model) handleFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.reloadJobs()
 		}
 	}
-	if m.form != nil {
+	if m.form != nil && wasEditingMulti != m.form.editingMulti() {
 		m.form.resize(m.width, m.height)
 	}
 	return m, cmd
