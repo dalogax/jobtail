@@ -61,6 +61,8 @@ On the jobs pane, **`n`** opens a form for a new job and **`e`** opens the selec
 
 Values are checked the way the CLI checks them — a 4-field cron, a directory that doesn't exist, an unknown notify event — and each problem is shown under its field; nothing is saved until all of them are right. A job's id and kind are fixed once it exists, as with `jobtail edit`. **`space`** pauses or resumes the selected job.
 
+The command, prompt and precheck are stored as text in the job's SQLite configuration; editing them doesn't create a separate file. While editing one of these multi-line values, its editor expands to use nearly the whole terminal. **`alt+enter`** (or **`ctrl+j`**) inserts a line; **`enter`** finishes editing.
+
 On the runs pane, **`c`** cleans a job's history: it says how many runs it will delete and asks before deleting them and their logs. A run still in progress is kept.
 
 ## Runs that don't finish
