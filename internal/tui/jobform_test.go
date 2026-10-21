@@ -266,6 +266,50 @@ func TestJobFormKeysWhileTyping(t *testing.T) {
 	}
 }
 
+func TestMultilineFieldsExpandToScreenWhileEditing(t *testing.T) {
+	for _, key := range []string{fCommand, fPrompt} {
+		t.Run(key, func(t *testing.T) {
+			f := newJobForm(nil, t.TempDir())
+			if key == fPrompt {
+				f.field(fKind).choice = 1 // agent jobs show the prompt instead of the command
+			}
+			for i, fl := range f.fields {
+				if fl.key == key {
+					f.cursor = i
+					break
+				}
+			}
+			f.resize(140, 40)
+			if result, _ := f.update(special(tea.KeyEnter)); result != formStay {
+				t.Fatalf("start editing result = %v, want formStay", result)
+			}
+			f.resize(140, 40)
+
+			field := f.field(key)
+			if field.area.Width() < 125 || field.area.Height() < 30 {
+				t.Fatalf("editor should use most of the terminal, got %dx%d", field.area.Width(), field.area.Height())
+			}
+			frame := strings.Split(plain(f.view(140, 40)), "\n")
+			if len(frame) != 40 {
+				t.Fatalf("expanded editor height = %d lines, want 40", len(frame))
+			}
+			for i, line := range frame {
+				if got := lipgloss.Width(line); got != 140 {
+					t.Fatalf("expanded editor line %d width = %d, want 140: %q", i, got, line)
+				}
+			}
+
+			if result, _ := f.update(special(tea.KeyEnter)); result != formStay {
+				t.Fatalf("stop editing result = %v, want formStay", result)
+			}
+			f.resize(140, 40)
+			if field.area.Height() != 4 {
+				t.Fatalf("compact form textarea height = %d, want 4", field.area.Height())
+			}
+		})
+	}
+}
+
 // TestJobFormQuitAsksOnlyWhenChanged: q on an untouched form closes it; on a
 // changed one it asks, and n goes back to the form with nothing lost.
 func TestJobFormQuitAsksOnlyWhenChanged(t *testing.T) {

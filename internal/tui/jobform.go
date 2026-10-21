@@ -668,8 +668,8 @@ func limitLabel(d time.Duration) string {
 	return out
 }
 
-// formGeometry is the modal's outer size on a width×height screen: wide enough
-// for a prompt to be readable, never the whole of a wide terminal.
+// formGeometry is the compact form's outer size on a width×height screen:
+// wide enough to read, but not the whole of a wide terminal.
 func formGeometry(width, height int) (w, h int) {
 	w = min(80, width-4)
 	if width < 50 {
@@ -678,10 +678,34 @@ func formGeometry(width, height int) (w, h int) {
 	return w, height
 }
 
+// geometry gives a multi-line field the terminal while it is being edited.
+// The compact form is useful for navigation; the prompt or script editor needs
+// room to read and change the value itself.
+func (f *jobForm) geometry(screenW, screenH int) (w, h int) {
+	w, h = formGeometry(screenW, screenH)
+	if f.editingMulti() && screenW >= 50 {
+		w = screenW - 4
+	}
+	return w, h
+}
+
+func (f *jobForm) editingMulti() bool {
+	return f.editing && f.fields[f.cursor].kind == fieldMulti
+}
+
 // resize fits the text widgets to the value column of a modal this wide.
 func (f *jobForm) resize(screenW, screenH int) {
-	w, _ := formGeometry(screenW, screenH)
-	_, vw := formColumns(w - boxChromeX)
+	w, maxH := f.geometry(screenW, screenH)
+	cw := w - boxChromeX
+	if f.editingMulti() {
+		fl := f.fields[f.cursor]
+		fl.area.SetWidth(max(cw-1, 1))
+		foot := append([]string{""}, f.footer(cw)...)
+		room := max(maxH-boxChromeY-len(f.header(cw))-len(foot), 1)
+		fl.area.SetHeight(room)
+		return
+	}
+	_, vw := formColumns(cw)
 	for _, fl := range f.fields {
 		switch fl.kind {
 		case fieldMulti:
@@ -703,9 +727,12 @@ func formColumns(cw int) (lw, vw int) {
 	return lw, max(cw-2-lw, 4)
 }
 
-// view renders the modal at the size formGeometry gives it.
+// view renders the modal at the size geometry gives it.
 func (f *jobForm) view(screenW, screenH int) string {
-	w, maxH := formGeometry(screenW, screenH)
+	if f.editingMulti() {
+		return f.editorView(screenW, screenH)
+	}
+	w, maxH := f.geometry(screenW, screenH)
 	cw := w - boxChromeX
 	lw, vw := formColumns(cw)
 	pad := func(s string) string { return lipgloss.NewStyle().Width(cw).MaxWidth(cw).Render(s) }
@@ -714,13 +741,9 @@ func (f *jobForm) view(screenW, screenH int) string {
 	// than the screen can scroll to it.
 	var body []string
 	curTop, curBottom := 0, 0
-	nErr := 0
 	for i, fl := range f.fields {
 		if !f.shown(fl) {
 			continue
-		}
-		if fl.err != "" {
-			nErr++
 		}
 		focused := i == f.cursor
 		if focused {
@@ -748,16 +771,9 @@ func (f *jobForm) view(screenW, screenH int) string {
 		}
 	}
 
-	var head []string
-	if nErr > 0 {
-		word := "fields need"
-		if nErr == 1 {
-			word = "field needs"
-		}
-		head = append(head, pad(statusFailed.Bold(true).Render(fmt.Sprintf("✗ %d %s attention", nErr, word))))
-	}
-	if f.err != "" {
-		head = append(head, pad(statusFailed.Render(truncateToWidth("✗ "+f.err, cw))))
+	head := f.header(cw)
+	for i := range head {
+		head[i] = pad(head[i])
 	}
 
 	foot := []string{""}
@@ -790,6 +806,70 @@ func (f *jobForm) view(screenW, screenH int) string {
 	}
 	pos, total := f.shownIndex()
 	return renderPane(title, fmt.Sprintf("%d/%d", pos, total), accentJobs, true, strings.Join(lines, "\n"))
+}
+
+// editorView gives a command, prompt, or precheck its own near-full-screen
+// editor. The regular form stays compact, so the other job settings remain
+// easy to scan while navigating between fields.
+func (f *jobForm) editorView(screenW, screenH int) string {
+	w, maxH := f.geometry(screenW, screenH)
+	cw := w - boxChromeX
+	pad := func(s string) string { return lipgloss.NewStyle().Width(cw).MaxWidth(cw).Render(s) }
+	fl := f.fields[f.cursor]
+	head := f.header(cw)
+	foot := append([]string{""}, f.footer(cw)...)
+	room := max(maxH-boxChromeY-len(head)-len(foot), 1)
+	fl.area.SetWidth(max(cw-1, 1))
+	fl.area.SetHeight(room)
+
+	body := make([]string, 0, room)
+	fill := lipgloss.NewStyle().Background(fieldBG).Width(cw).MaxWidth(cw)
+	for _, line := range strings.Split(fl.area.View(), "\n") {
+		body = append(body, fill.Render(" "+line))
+	}
+	for len(body) < room {
+		body = append(body, fill.Render(""))
+	}
+	if len(body) > room {
+		body = body[:room]
+	}
+	for i := range head {
+		head[i] = pad(head[i])
+	}
+	lines := append(head, body...)
+	lines = append(lines, foot...)
+
+	title := "New job"
+	if f.editID != "" {
+		title = "Edit " + f.editID
+	}
+	title += " · " + fl.label
+	if f.changed() > 0 {
+		title += " ●"
+	}
+	pos, total := f.shownIndex()
+	return renderPane(title, fmt.Sprintf("%d/%d", pos, total), accentJobs, true, strings.Join(lines, "\n"))
+}
+
+func (f *jobForm) header(cw int) []string {
+	nErr := 0
+	for _, fl := range f.fields {
+		if f.shown(fl) && fl.err != "" {
+			nErr++
+		}
+	}
+	var head []string
+	if nErr > 0 {
+		word := "fields need"
+		if nErr == 1 {
+			word = "field needs"
+		}
+		head = append(head, statusFailed.Bold(true).Render(fmt.Sprintf("✗ %d %s attention", nErr, word)))
+	}
+	if f.err != "" {
+		head = append(head, statusFailed.Render(truncateToWidth("✗ "+f.err, cw)))
+	}
+	return head
 }
 
 func truncateLabel(s string, w int) string {

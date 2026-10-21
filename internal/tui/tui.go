@@ -1886,6 +1886,9 @@ func (m model) handleFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.reloadJobs()
 		}
 	}
+	if m.form != nil {
+		m.form.resize(m.width, m.height)
+	}
 	return m, cmd
 }
 
